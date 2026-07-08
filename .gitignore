@@ -36,3 +36,20 @@ xsscanner/xssniper
 *.bin
 *.test
 *.prof
+# Python Virtual Environment
+watchtower/venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Go Compiled Binaries (xsscanner)
+xsscanner/nice_katana
+xsscanner/nice_params
+xsscanner/nice_passive
+xsscanner/x9
+xsscanner/dom_sink_checker
+xsscanner/xssniper
+xsscanner/xsscanner
+
+# Database temporary files
+watchtower/database/db_data/
