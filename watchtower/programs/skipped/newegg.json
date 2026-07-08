@@ -1,0 +1,5 @@
+{
+  "program_name": "newegg",
+  "scopes": ["newegg.com", "newegg.ca"],
+  "outofscope":["sellingpilot.newegg.com", "jobs.newegg.com", "neweggbusiness.com"]
+}

@@ -1,0 +1,28 @@
+id: x9-canary-probe
+
+info:
+  name: X9 Canary Probe Matcher
+  author: arian & manus
+  severity: info
+  description: Detects reflection of harmless canary strings to identify vulnerable parameters.
+  tags: canary, xss, reconnaissance
+
+http:
+  - raw:
+      - |
+        GET {{Path}} HTTP/1.1
+        Host: {{Host}}
+
+    matchers-condition: or
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "x9canary[a-z]{3}"
+
+    extractors:
+      - type: regex
+        part: body
+        regex:
+          - "x9canary[a-z]{3}"
+        group: 0

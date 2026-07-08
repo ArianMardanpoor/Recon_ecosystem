@@ -1,0 +1,12 @@
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: watchtower-mongo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      # ذخیره مستقیم دیتاها در پوشه db_data در کنار همین فایل
+      - ./db_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=watchtower

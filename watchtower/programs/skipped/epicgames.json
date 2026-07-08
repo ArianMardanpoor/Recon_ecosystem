@@ -1,0 +1,5 @@
+{
+  "program_name": "epicgames",
+  "scopes": ["unrealtournament.com", "unrealengine.com", "twinmotion.com", "sketchfab.com", "singspacegame.com", "rocketleague.com", "quixel.com", "psyonix.com", "psynet.gg", "oncatapult.com", "mediatonic.co.uk", "hmxwebservices.com", "hmxservices.com", "harmonixmusic.com", "fortnite.com", "epicgames.dev", "epicgames.com", "easy.ac", "dropmix.com", "dancecentral.com", "cubicmotion.com", "audicagame.com", "artstation.com", "amplitude-game.com", "3lateral.com", "fallguys.com"],
+  "outofscope":["www-api.hmxservices.com","webinars.unrealengine.com","web-admin.harmonixmusic.com","watch.fortnite.com","vimeo.aquiris.com.br","unrealfest.unrealengine.com","udn.unrealengine.com","twinmotionhelp.epicgames.com","teamcity.hmxservices.com","teamcity-external.harmonixmusic.com","tableau.harmonixmusic.com","swarm.harmonixmusic.com","swarm-monitoring-node-01.hmxservices.com","support.harmonixmusic.com","support.capturingreality.com"]
+}

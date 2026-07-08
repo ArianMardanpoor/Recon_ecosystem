@@ -1,0 +1,120 @@
+id: dom-xss-headless
+
+info:
+  name: DOM-based XSS Detection (Headless)
+  author: arian & manus
+  severity: high
+  description: |
+    Uses a headless browser to detect if injected parameters reflect into dangerous DOM sinks.
+    This template tracks the randomized 'x9' prefix in common sinks.
+  tags: headless, dom-xss, xss
+
+headless:
+  - steps:
+      - action: setheader
+        args:
+          part: response
+          key: Content-Security-Policy
+          value: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
+
+      - action: navigate
+        args:
+          url: "{{BaseURL}}"
+
+      - action: waitload
+
+      - action: script
+        args:
+          hook: true
+          code: |
+            () => {
+              window.capturedSinks = window.capturedSinks || [];
+              const xssPattern = /x9[a-z]{3}['\"`\\;<{]/;
+              function track(sinkName, value) {
+                if (xssPattern.test(String(value))) {
+                  window.capturedSinks.push(sinkName);
+                }
+              }
+              try {
+                const origEval = window.eval;
+                window.eval = function(c) {
+                  track('eval', c);
+                  try { return origEval(c); } catch(e) {}
+                };
+              } catch(e) {}
+              try {
+                const origST = window.setTimeout;
+                window.setTimeout = function(f, d) {
+                  track('setTimeout', String(f));
+                  try { return origST(f, d); } catch(e) {}
+                };
+              } catch(e) {}
+              try {
+                const origSI = window.setInterval;
+                window.setInterval = function(f, d) {
+                  track('setInterval', String(f));
+                  try { return origSI(f, d); } catch(e) {}
+                };
+              } catch(e) {}
+              try {
+                const origDW = document.write.bind(document);
+                document.write = function(c) { track('document.write', c); return origDW(c); };
+              } catch(e) {}
+              try {
+                const origDWL = document.writeln.bind(document);
+                document.writeln = function(c) { track('document.writeln', c); return origDWL(c); };
+              } catch(e) {}
+              var props = [
+                [Element.prototype, 'innerHTML'],
+                [Element.prototype, 'outerHTML'],
+                [HTMLImageElement.prototype, 'src'],
+                [HTMLScriptElement.prototype, 'src'],
+                [HTMLIFrameElement.prototype, 'src'],
+                [HTMLAnchorElement.prototype, 'href']
+              ];
+              props.forEach(function(item) {
+                try {
+                  var proto = item[0];
+                  var prop = item[1];
+                  var desc = Object.getOwnPropertyDescriptor(proto, prop);
+                  if (!desc || !desc.set || !desc.get) return;
+                  Object.defineProperty(proto, prop, {
+                    configurable: true,
+                    get: function() { return desc.get.call(this); },
+                    set: function(v) { track(prop, v); desc.set.call(this, v); }
+                  });
+                } catch(e) {}
+              });
+              if (xssPattern.test(document.documentElement.innerHTML)) {
+                window.capturedSinks.push("innerHTML_static");
+              }
+            }
+
+      - action: script
+        name: dom_reflection
+        args:
+          code: |
+            () => {
+              return [...new Set(window.capturedSinks || [])].join(",") || "";
+            }
+
+    matchers:
+      - type: word
+        part: dom_reflection
+        words:
+          - "innerHTML"
+          - "outerHTML"
+          - "eval"
+          - "setTimeout"
+          - "setInterval"
+          - "document.write"
+          - "document.writeln"
+          - "src"
+          - "href"
+          - "innerHTML_static"
+
+    extractors:
+      - type: regex
+        part: dom_reflection
+        regex:
+          - "[a-zA-Z0-9_.]+"

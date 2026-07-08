@@ -1,0 +1,5 @@
+{
+  "program_name": "shopify",
+  "scopes": ["myshopify.com", "shopifycs.com", "pci.shopifyinc.com", "shopifykloud.com", "shopifycloud.com", "shopify.io", "shopify.com",""],
+  "outofscope":["email.shopify.com","academy.shopify.com", "cdn.shopify.com", "community.shopify.com", "community.shopify.dev", "investors.shopify.com", "livechat.shopify.com", "supplier-portal.shopifycloud.com"]
+}
