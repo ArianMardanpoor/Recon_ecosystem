@@ -4,7 +4,7 @@ source venv/bin/activate
 set -e
 
 # آدرس‌دهی مطلق (Absolute Path) برای جلوگیری از خطای پیدا نشدن فایل‌ها
-BASE_DIR="$HOME/watchtower"
+BASE_DIR="/workspaces/Recon_ecosystem/watchtower"
 source "$BASE_DIR/venv/bin/activate"
 
 # لاگ کردن با تاریخ

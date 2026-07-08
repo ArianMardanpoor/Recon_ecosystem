@@ -1,12 +1,12 @@
 services:
-  mongodb:
-    image: mongo:7.0
-    container_name: watchtower-mongo
-    restart: unless-stopped
+  watchtower-api:
+    build: 
+      context: ..
+      dockerfile: database/Dockerfile  # به داکر می‌گوید فایل داکرفایل داخل پوشه دیتابیس است
+    container_name: watchtower-backend
     ports:
-      - "127.0.0.1:27017:27017"
-    volumes:
-      # ذخیره مستقیم دیتاها در پوشه db_data در کنار همین فایل
-      - ./db_data:/data/db
+      - "3131:3131"
     environment:
-      - MONGO_INITDB_DATABASE=watchtower
+      - MONGO_URI=mongodb+srv://arianapex4_db_user:q0EzEexHHakVpzdV@cluster0.mzmzk4u.mongodb.net/?appName=Cluster0
+      - API_TOKEN=a21uc0lzeTcK
+    restart: unless-stopped
