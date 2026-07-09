@@ -13,7 +13,7 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "moduleResolution": "bundler",
-    "baseUrl": "http://localhost:3113/api",
+    "baseUrl": "http://localhost:3131/api",
     "types": ["node", "vite/client"],
     "paths": {
       "@/*": ["./client/src/*"],

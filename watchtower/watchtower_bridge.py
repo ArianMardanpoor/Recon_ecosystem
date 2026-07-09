@@ -8,7 +8,7 @@ import time
 
 # --- تنظیمات سیستم شما ---
 # آدرس پایه API (بدون /api/http چون در تابع اضافه می‌شود)
-BASE_API_URL = "http://YOUR_WATCHTOWER_API/api" 
+BASE_API_URL = "http://YOUR_WATCHTOWER_API/" 
 API_TOKEN = "a21uc0lzeTcK"                      # توکن پیش‌فرض در app.py
 OLD_TARGETS_FILE = "all_scanned_targets.txt"    # فایل تاریخچه برای anew
 OUTPUT_DIR = "./watchtower_scans"               # محل ذخیره لاگ‌های اسکن

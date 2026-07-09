@@ -9,14 +9,14 @@ import re
 # ایمپورت notify با مسیر نسبی
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.notify import queue_new_http, queue_http_change
-
+MONGO_URI = os.getenv("MONGO_URI")
 def current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # اتصال به MongoDB
 connect(
     db="watchtower",
-    host="mongodb://localhost:27017/watchtower",
+    host=MONGO_URI,
     alias="default"
 )
 
