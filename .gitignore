@@ -41,7 +41,7 @@ watchtower/venv/
 .venv/
 __pycache__/
 *.pyc
-
+.devcontainer/venv/
 # Go Compiled Binaries (xsscanner)
 xsscanner/nice_katana
 xsscanner/nice_params
