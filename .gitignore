@@ -53,3 +53,12 @@ xsscanner/xsscanner
 
 # Database temporary files
 watchtower/database/db_data/
+
+
+#results
+xsscanner/all_scanned_targets.txt
+xsscanner/output/
+xsscanner/results/
+
+#programs
+*.json
