@@ -1,11 +1,9 @@
-// FILE: xssniper.go — REFACTORED LOGGING
+// FILE: xssniper.go — REFACTORED LOGGING, TECH-AWARE ROUTING & JS RISK DETECTION
 // Changes:
-// - Removed all [DEBUG] log lines.
-// - Removed phase announcement lines (e.g., "2/5 Canary Probing...").
-// - Removed "No reflective parameters found." and "dom_sink_checker confirmed" INFO lines.
-// - Replaced phase 3 summary with [HIT] or [CLEAN] single-line output.
-// - Added [DEAD] line when all DOM probes are skipped due to dead target.
-// - Fixed unused variable compilation error.
+// - Removed IsLegacyServerRendered logic and legacy framework assumptions.
+// - Added hasClientSideJSRisk() to perform a lightweight GET and check for <script> tags.
+// - Changed DOM check skipping logic to only trigger when NO JavaScript is present in the DOM.
+// - Retained SPA logic for skipping Header Injection.
 
 package main
 
@@ -32,10 +30,72 @@ import (
 	"time"
 	"unicode"
 
+	"reconpipeline/pkg/ratelimit"
 	"reconpipeline/pkg/reporter"
 )
 
 var repLogger *reporter.Logger
+
+// ── Tech Profile & Classification ───────────────────────────────────────────
+
+type TechProfile struct {
+	IsSPA   bool
+	Unknown bool
+}
+
+func classifyTechProfile(techList []string) TechProfile {
+	if len(techList) == 0 || (len(techList) == 1 && techList[0] == "") {
+		return TechProfile{Unknown: true}
+	}
+	spaKeywords := []string{"react", "next.js", "angular", "vue", "svelte"}
+
+	profile := TechProfile{}
+	hasSPA := false
+
+	for _, t := range techList {
+		tl := strings.ToLower(strings.TrimSpace(t))
+		for _, kw := range spaKeywords {
+			if strings.Contains(tl, kw) {
+				hasSPA = true
+			}
+		}
+	}
+
+	if hasSPA {
+		profile.IsSPA = true
+	} else {
+		profile.Unknown = true
+	}
+	return profile
+}
+
+// ── Client-Side JS Risk Detection ──────────────────────────────────────────
+
+// hasClientSideJSRisk performs a quick GET request to check if the target has ANY scripts.
+// If it fails or times out, it conservatively returns true (assume JS exists).
+func hasClientSideJSRisk(targetURL string) bool {
+	ratelimit.Acquire(targetURL)
+	client := ratelimit.GetHTTPClient(targetURL)
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return true // conservative fallback
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; xssniper)")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return true
+	}
+	defer resp.Body.Close()
+	
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return true
+	}
+	
+	bodyLower := strings.ToLower(string(bodyBytes))
+	return strings.Contains(bodyLower, "<script")
+}
 
 // ── Telegram Configuration ───────────────────────────────────────────────────
 
@@ -66,7 +126,6 @@ type DomSinkOutput struct {
 	Sinks []string `json:"sinks"`
 }
 
-// severityToConfidence maps xssniper's internal severity to the unified schema.
 func severityToConfidence(sev string) string {
 	switch sev {
 	case "confirmed":
@@ -78,7 +137,6 @@ func severityToConfidence(sev string) string {
 	}
 }
 
-// logReportFindings pushes every Vulnerability entry in a report to the unified JSONL log.
 func logReportFindings(report *VulnerabilityReport) {
 	if repLogger == nil {
 		return
@@ -414,7 +472,8 @@ func severityWeight(s string) int {
 }
 
 func verifyReflection(targetURL, method string, headers map[string]string, body, canary string) bool {
-	client := &http.Client{Timeout: 10 * time.Second}
+	ratelimit.Acquire(targetURL)
+	client := ratelimit.GetHTTPClient(targetURL)
 	var req *http.Request
 	var err error
 
@@ -563,8 +622,8 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 
 	vulnDir := filepath.Join(outputDir, "vulnerabilities")
 	os.MkdirAll(vulnDir, 0755)
-	safeName := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(report.URL, "_")
-	fileName := filepath.Join(vulnDir, safeName+".json")
+	safeNameStr := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(report.URL, "_")
+	fileName := filepath.Join(vulnDir, safeNameStr+".json")
 	os.WriteFile(fileName, reportJSON, 0644)
 
 	hasHighSeverity := false
@@ -597,7 +656,10 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 		}
 		body, _ := json.Marshal(payload)
 		apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tg.Token)
-		http.Post(apiURL, "application/json", bytes.NewReader(body))
+		
+		ratelimit.Acquire(apiURL)
+		client := ratelimit.GetHTTPClient(apiURL)
+		client.Post(apiURL, "application/json", bytes.NewReader(body))
 	}
 }
 
@@ -629,6 +691,8 @@ var (
 	domTemplate          string
 	canaryTemplate       string
 	paramFile            string
+	techFlag             string
+	forceAll             bool
 	concurrency          int
 	workers              int
 	mu                   sync.Mutex
@@ -667,13 +731,6 @@ type TriageEntry struct {
 func logLine(level, color, format string, args ...interface{}) {
 	ts := time.Now().Format("15:04:05")
 	fmt.Printf("%s[%s]%s %s[%s]%s %s\n", X_gray, ts, X_reset, color, level, X_reset, fmt.Sprintf(format, args...))
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func stripANSI(str string) string {
@@ -726,14 +783,15 @@ func isTargetAlive(targetURL string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
+	ratelimit.Acquire(targetURL)
+	client := ratelimit.GetHTTPClient(targetURL)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
 	}
+	
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return false
@@ -812,7 +870,8 @@ func extractURLsFromNuclei(nucleiOutput string) []string {
 // ── SPA Detection ────────────────────────────────────────────────────────────
 
 func isSPA(targetURL string) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
+	ratelimit.Acquire(targetURL)
+	client := ratelimit.GetHTTPClient(targetURL)
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
 		return false
@@ -888,15 +947,15 @@ func isGenericReflector(targetURL string) bool {
 	u.RawQuery = q.Encode()
 	finalURL := u.String()
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 2 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+	ratelimit.Acquire(finalURL)
+	client := ratelimit.GetHTTPClient(finalURL)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 2 {
+			return http.ErrUseLastResponse
+		}
+		return nil
 	}
+	
 	req, err := http.NewRequest("GET", finalURL, nil)
 	if err != nil {
 		return false
@@ -974,7 +1033,12 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 }
 
 func reflectionExists(targetURL, method string, headers map[string]string, body, payload string) bool {
-	client := &http.Client{Timeout: 10 * time.Second}
+	// ۱. گرفتن اجازه (Token) قبل از شروع هر درخواست شبکه برای این دامنه
+	ratelimit.Acquire(targetURL)
+
+	// ۲. استفاده از کلاینت مدیریت‌شده (همراه با Proxy چرخشی و Timeout)
+	client := ratelimit.GetHTTPClient(targetURL)
+
 	var req *http.Request
 	var err error
 	if method == "POST" {
@@ -997,6 +1061,7 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 		return false
 	}
 	defer resp.Body.Close()
+	
 	b, _ := io.ReadAll(resp.Body)
 	return strings.Contains(string(b), payload)
 }
@@ -1075,6 +1140,10 @@ func processURL(targetURL string, index, total int) {
 		return
 	}
 
+	// Tech-Aware Profile Classification (for Header Injection only)
+	techListStr := strings.Split(techFlag, ",")
+	profile := classifyTechProfile(techListStr)
+
 	report := VulnerabilityReport{URL: targetURL}
 
 	// Phase 2: Canary Probe
@@ -1131,18 +1200,17 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 
-	// BUG 2: Add PHASE2 log before early return
 	logLine("PHASE2", X_gray, "probe files generated for %s", targetURL)
 
-	// If phase < 3, stop here
 	if phase < 3 {
 		return
 	}
 
 	// Phase 3: Filter Vulnerable Parameters
 	targetAlive := isTargetAlive(targetURL)
-
+	var hasJS bool
 	if targetAlive {
+		hasJS = hasClientSideJSRisk(targetURL)
 		atomic.StoreInt64(&consecutiveDead, 0)
 	} else {
 		newCount := atomic.AddInt64(&consecutiveDead, 1)
@@ -1164,30 +1232,18 @@ func processURL(targetURL string, index, total int) {
 	p3Findings := make(map[string][]string)
 	candidateHeaders := []string{}
 
-	domProbeSkippedAll := false // track if all dom probes were skipped
+	domProbeSkippedAll := false
 
 	for pf, probePhase := range probeFiles {
 		if _, err := os.Stat(pf); err == nil {
-			if probePhase == "dom" {
-				if !targetAlive {
-					domProbeSkippedAll = true
+			
+			// TECH-AWARE: Skip Header parsing logic if SPA
+			if probePhase == "header" {
+				if profile.IsSPA && !forceAll {
+					logLine("SKIP-TECH", X_cyan, "Skipping header injection for %s due to detected SPA tech: %s", targetURL, techFlag)
 					continue
 				}
-
-				if domSinkCheckerExists {
-					res, _ := runCommand("./dom_sink_checker", "-l", pf)
-					if res != "" {
-						lines := strings.Split(strings.TrimSpace(res), "\n")
-						for _, l := range lines {
-							l = strings.TrimSpace(l)
-							var probe DomSinkOutput
-							if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
-								p3Findings["dom"] = append(p3Findings["dom"], l)
-							}
-						}
-					}
-				}
-			} else if probePhase == "header" {
+				
 				file, err := os.Open(pf)
 				if err != nil {
 					continue
@@ -1225,6 +1281,33 @@ func processURL(targetURL string, index, total int) {
 					}
 				}
 				file.Close()
+
+			} else if probePhase == "dom" {
+				// TECH-AWARE: Skip DOM sink if absolutely no JS exists on page
+				if !hasJS && !forceAll {
+					logLine("SKIP-NOJS", X_cyan, "Skipping DOM checks for %s: no <script> tags detected in page", targetURL)
+					domProbeSkippedAll = true
+					continue
+				}
+
+				if !targetAlive {
+					domProbeSkippedAll = true
+					continue
+				}
+
+				if domSinkCheckerExists {
+					res, _ := runCommand("./dom_sink_checker", "-l", pf)
+					if res != "" {
+						lines := strings.Split(strings.TrimSpace(res), "\n")
+						for _, l := range lines {
+							l = strings.TrimSpace(l)
+							var probe DomSinkOutput
+							if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
+								p3Findings["dom"] = append(p3Findings["dom"], l)
+							}
+						}
+					}
+				}
 			} else {
 				res, _ := runCommand("nuclei", "-l", pf, "-t", canaryTemplate, "-silent")
 				p3Findings[probePhase] = append(p3Findings[probePhase], extractURLsFromNuclei(res)...)
@@ -1234,7 +1317,12 @@ func processURL(targetURL string, index, total int) {
 
 	// DOM query probe
 	if _, err := os.Stat(domQueryProbeFile); err == nil {
-		if !targetAlive {
+		if !hasJS && !forceAll {
+			logLine("SKIP-NOJS", X_cyan, "Skipping DOM query sink checker for %s: no <script> tags detected in page", targetURL)
+			if !targetAlive {
+				domProbeSkippedAll = true
+			}
+		} else if !targetAlive {
 			domProbeSkippedAll = true
 		} else if domSinkCheckerExists {
 			res, _ := runCommand("./dom_sink_checker", "-l", domQueryProbeFile)
@@ -1251,13 +1339,10 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 
-	// Print [DEAD] if all DOM probes were skipped
 	if domProbeSkippedAll && (fileExists(probeOutputBase+".dom.canary") || fileExists(domQueryProbeFile)) {
 		logLine("DEAD", X_yellow, "%s", targetURL)
 	}
 
-	// --- BUG 3: Summary line for all phases >= 3 ---
-	// Build summary (same as phase==3 block)
 	getParamSet := make(map[string]bool)
 	for _, u := range p3Findings["get"] {
 		parsed, err := url.Parse(u)
@@ -1277,7 +1362,6 @@ func processURL(targetURL string, index, total int) {
 	headers := candidateHeaders
 	sort.Strings(headers)
 
-	// Print summary always
 	if len(getParamSet) > 0 || domCount > 0 || len(headers) > 0 {
 		paramsStr := strings.Join(getParams, ", ")
 		if paramsStr == "" {
@@ -1292,9 +1376,7 @@ func processURL(targetURL string, index, total int) {
 		logLine("CLEAN", X_gray, "%s", targetURL)
 	}
 
-	// Phase 3 summary and triage (write triage file only if phase == 3)
 	if phase == 3 {
-		// Write triage file (using computed getParams, domCount, headers)
 		var triageContent strings.Builder
 		triageContent.WriteString(fmt.Sprintf("TARGET: %s\n", targetURL))
 		triageContent.WriteString(fmt.Sprintf("SCANNED: %s\n\n", time.Now().Format(time.RFC3339)))
@@ -1381,7 +1463,6 @@ func processURL(targetURL string, index, total int) {
 		return
 	}
 
-	// If no findings at all and phase > 3, return
 	if len(p3Findings) == 0 && len(candidateHeaders) == 0 {
 		return
 	}
@@ -1392,7 +1473,6 @@ func processURL(targetURL string, index, total int) {
 		confirmedParams[p] = make(map[string]bool)
 	}
 
-	// BUG 1: rename loop variable from "phase" to "probePhase" (first loop)
 	for probePhase, urls := range p3Findings {
 		if probePhase == "dom" {
 			continue
@@ -1419,13 +1499,6 @@ func processURL(targetURL string, index, total int) {
 					v.Severity = "confirmed"
 					v.Payloads = p
 					confirmedParams[probePhase][v.Name] = true
-					switch probePhase {
-					case "get":
-						report.QueryParameters = append(report.QueryParameters, v)
-					case "json":
-						report.JSONBody = append(report.JSONBody, v)
-					}
-					logLine("CONFIRM", X_green, "Confirmed XSS (%s): %s (param: %s)", probePhase, targetURL, v.Name)
 				}
 			}
 		}
@@ -1450,7 +1523,6 @@ func processURL(targetURL string, index, total int) {
 
 	// Phase 4: Heavy Attack
 	httpAtkUrls := []string{}
-	// BUG 1: rename loop variable from "phase" to "probePhase" (second loop)
 	for probePhase, urls := range p3Findings {
 		if probePhase == "dom" {
 			continue
@@ -1497,62 +1569,66 @@ func processURL(targetURL string, index, total int) {
 			}
 		}
 
-		headerAtkFile := finalX9Base + ".header"
-		if _, err := os.Stat(headerAtkFile); err == nil {
-			file, err := os.Open(headerAtkFile)
-			if err == nil {
-				scanner := bufio.NewScanner(file)
-				for scanner.Scan() {
-					line := strings.TrimSpace(scanner.Text())
-					if line == "" {
-						continue
-					}
-					parts := strings.SplitN(line, "|", 2)
-					if len(parts) != 2 {
-						continue
-					}
-					urlPart := parts[0]
-					headerPart := parts[1]
-					headerParts := strings.SplitN(headerPart, ":", 2)
-					if len(headerParts) != 2 {
-						continue
-					}
-					headerName := strings.TrimSpace(headerParts[0])
-					headerValue := strings.TrimSpace(headerParts[1])
+		if profile.IsSPA && !forceAll {
+			logLine("SKIP-TECH", X_cyan, "Skipping Phase 4 header injection for %s due to detected SPA tech: %s", targetURL, techFlag)
+		} else {
+			headerAtkFile := finalX9Base + ".header"
+			if _, err := os.Stat(headerAtkFile); err == nil {
+				file, err := os.Open(headerAtkFile)
+				if err == nil {
+					scanner := bufio.NewScanner(file)
+					for scanner.Scan() {
+						line := strings.TrimSpace(scanner.Text())
+						if line == "" {
+							continue
+						}
+						parts := strings.SplitN(line, "|", 2)
+						if len(parts) != 2 {
+							continue
+						}
+						urlPart := parts[0]
+						headerPart := parts[1]
+						headerParts := strings.SplitN(headerPart, ":", 2)
+						if len(headerParts) != 2 {
+							continue
+						}
+						headerName := strings.TrimSpace(headerParts[0])
+						headerValue := strings.TrimSpace(headerParts[1])
 
-					if confirmedParams["header"] != nil && confirmedParams["header"][headerName] {
-						continue
-					}
+						if confirmedParams["header"] != nil && confirmedParams["header"][headerName] {
+							continue
+						}
 
-					if checkHeaderReflection(urlPart, headerName, headerValue) {
-						found := false
-						for i, v := range report.Headers {
-							if v.Name == headerName {
-								exists := false
-								for _, p := range v.Payloads {
-									if p == headerValue {
-										exists = true
-										break
+						if checkHeaderReflection(urlPart, headerName, headerValue) {
+							found := false
+							for i, v := range report.Headers {
+								if v.Name == headerName {
+									exists := false
+									for _, p := range v.Payloads {
+										if p == headerValue {
+											exists = true
+											break
+										}
 									}
+									if !exists {
+										report.Headers[i].Payloads = append(report.Headers[i].Payloads, headerValue)
+									}
+									found = true
+									break
 								}
-								if !exists {
-									report.Headers[i].Payloads = append(report.Headers[i].Payloads, headerValue)
-								}
-								found = true
-								break
 							}
+							if !found {
+								report.Headers = append(report.Headers, Vulnerability{
+									Name:     headerName,
+									Severity: "likely",
+									Payloads: []string{headerValue},
+								})
+							}
+							logLine("FIND", X_green, "Found header reflection: %s = %s", headerName, headerValue)
 						}
-						if !found {
-							report.Headers = append(report.Headers, Vulnerability{
-								Name:     headerName,
-								Severity: "likely",
-								Payloads: []string{headerValue},
-							})
-						}
-						logLine("FIND", X_green, "Found header reflection: %s = %s", headerName, headerValue)
 					}
+					file.Close()
 				}
-				file.Close()
 			}
 		}
 	}
@@ -1570,17 +1646,21 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 	if len(fragmentURLs) > 0 {
-		atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-atk-in.txt")
-		os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(fragmentURLs), "\n")), 0644)
-		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom")
-		runCommand("./x9", "-i", atkIn, "-dom", "-o", finalX9Base)
-		if domSinkCheckerExists {
-			if dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".dom.attack", "-timeout", "300"); dom != "" {
-				report.aggregateFindings(dom, "dom_confirmed")
+		if !hasJS && !forceAll {
+			logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM fragment attack for %s: no <script> tags detected in page", targetURL)
+		} else {
+			atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-atk-in.txt")
+			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(fragmentURLs), "\n")), 0644)
+			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom")
+			runCommand("./x9", "-i", atkIn, "-dom", "-o", finalX9Base)
+			if domSinkCheckerExists {
+				if dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".dom.attack", "-timeout", "300"); dom != "" {
+					report.aggregateFindings(dom, "dom_confirmed")
+				}
 			}
 		}
 	}
-	// Add DOM canary findings to report as "likely"
+
 	for _, line := range p3Findings["dom"] {
 		var domOut DomSinkOutput
 		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
@@ -1602,14 +1682,18 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 	if len(domQueryURLs) > 0 {
-		atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-atk-in.txt")
-		os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(domQueryURLs), "\n")), 0644)
-		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom-query")
-		runCommand("./x9", "-i", atkIn, "-o", finalX9Base)
-		if domSinkCheckerExists {
-			dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".get", "-timeout", "300")
-			if dom != "" {
-				report.aggregateFindings(dom, "dom_confirmed")
+		if !hasJS && !forceAll {
+			logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM query attack for %s: no <script> tags detected in page", targetURL)
+		} else {
+			atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-atk-in.txt")
+			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(domQueryURLs), "\n")), 0644)
+			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom-query")
+			runCommand("./x9", "-i", atkIn, "-o", finalX9Base)
+			if domSinkCheckerExists {
+				dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".get", "-timeout", "300")
+				if dom != "" {
+					report.aggregateFindings(dom, "dom_confirmed")
+				}
 			}
 		}
 	}
@@ -1684,6 +1768,8 @@ func main() {
 	flag.StringVar(&domTemplate, "dom", "dom_xss.yaml", "DOM template")
 	flag.StringVar(&canaryTemplate, "canary", "canary_matcher.yaml", "Canary template")
 	flag.StringVar(&paramFile, "p", "", "Parameter file")
+	flag.StringVar(&techFlag, "tech", "", "Comma-separated list of technologies")
+	flag.BoolVar(&forceAll, "force-all", false, "Disable tech-aware skipping logic")
 	flag.IntVar(&concurrency, "c", 10, "x9 concurrency")
 	flag.IntVar(&workers, "w", 3, "Parallel workers")
 	flag.IntVar(&maxURLsPerTarget, "max-urls", 50, "Max URLs per target")
@@ -1691,6 +1777,10 @@ func main() {
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
 	flag.Parse()
+	ratelimit.StartServer()
+    
+    // ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
+    _ = ratelimit.LoadProxies("proxies.txt")
 	var err error
 	repLogger, err = reporter.NewLogger("results/raw_findings.jsonl")
 	if err != nil {
