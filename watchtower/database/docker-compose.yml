@@ -1,12 +1,30 @@
 services:
   watchtower-api:
-    build: 
+    build:
       context: ..
       dockerfile: database/Dockerfile  # به داکر می‌گوید فایل داکرفایل داخل پوشه دیتابیس است
     container_name: watchtower-backend
     ports:
       - "3131:3131"
-    environment:
-      - MONGO_URI=mongodb+srv://arianapex4_db_user:q0EzEexHHakVpzdV@cluster0.mzmzk4u.mongodb.net/?appName=Cluster0
-      - API_TOKEN=a21uc0lzeTcK
+    env_file:
+      - ../.env   # watchtower/.env — MONGO_URI, WATCHTOWER_API_TOKEN, etc.
     restart: unless-stopped
+
+  # Optional local MongoDB, only started when explicitly requested:
+  #   docker compose --profile local-db up -d
+  # Use this if you don't want to depend on Atlas (e.g. offline dev,
+  # throwaway Codespaces environments). Point MONGO_URI in watchtower/.env
+  # at `mongodb://localhost:27017/watchtower` to use it.
+  mongo:
+    image: mongo:7
+    container_name: watchtower-mongo
+    profiles:
+      - local-db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_local_data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo_local_data:

@@ -6,11 +6,30 @@ import tldextract
 import os
 import sys
 import re
+from dotenv import load_dotenv
 
 # ایمپورت notify با مسیر نسبی
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.notify import queue_new_http, queue_http_change
+
+# ==========================================
+# Environment loading (works identically in local dev and Codespaces)
+# ==========================================
+# BASE_DIR = watchtower/ (parent of this database/ folder)
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError(
+        "MONGO_URI is not set.\n"
+        "Copy watchtower/.env.example to watchtower/.env and set MONGO_URI "
+        "before running any watch_* script or app.py.\n"
+        "  cp watchtower/.env.example watchtower/.env\n"
+        "  # then edit watchtower/.env and fill in MONGO_URI"
+    )
+
+
 def current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
