@@ -1,6 +1,7 @@
 from mongoengine import Document, StringField, DateTimeField, ListField, DictField, IntField, BooleanField, connect
 from pymongo import UpdateOne  # اضافه شده برای عملیات گروهی و پرسرعت
 from datetime import datetime
+from dotenv import load_dotenv
 import tldextract
 import os
 import sys

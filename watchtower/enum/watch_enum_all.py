@@ -29,8 +29,6 @@ if __name__ == "__main__":
             modules = [
                 "watch_subfinder.py",
                 "watch_crtsh.py",
-                "watch_amass.py",
-                "watch_assetfinder.py",
                 "watch_waybackurls.py",
             ]
             

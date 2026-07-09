@@ -1,11 +1,37 @@
 #!/bin/zsh
-source venv/bin/activate
 # توقف اجرای اسکریپت در صورت بروز هرگونه خطای حیاتی در دستورات (جلوگیری از اجرای مراحل بعدی روی دیتای ناقص)
 set -e
 
-# آدرس‌دهی مطلق (Absolute Path) برای جلوگیری از خطای پیدا نشدن فایل‌ها
-BASE_DIR="/workspaces/Recon_ecosystem/watchtower"
+# آدرس‌دهی مطلق (Absolute Path) — به‌جای هاردکد کردن مسیر، خودش را از محل
+# فیزیکی این اسکریپت پیدا می‌کند، پس چه لوکال (~/Recon_ecosystem) چه در
+# Codespaces (/workspaces/Recon_ecosystem) بدون تغییر کار می‌کند.
+# ${(%):-%N} مخصوص zsh است؛ ${BASH_SOURCE[0]} برای سازگاری با bash.
+SCRIPT_PATH="${(%):-%N}"
+if [ -z "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+fi
+BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" &> /dev/null && pwd)"
+
 source "$BASE_DIR/venv/bin/activate"
+
+# --- Pre-flight check: fail fast with a readable message instead of a
+# raw pymongo ServerSelectionTimeoutError stack trace if .env is missing
+# or MONGO_URI isn't set. ---
+ENV_FILE="$BASE_DIR/.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo "[!] ERROR: $ENV_FILE not found."
+    echo "    Copy the example and set MONGO_URI before running watch.sh:"
+    echo "      cp $BASE_DIR/.env.example $ENV_FILE"
+    echo "      # then edit $ENV_FILE"
+    exit 1
+fi
+
+if ! grep -qE '^MONGO_URI=.+' "$ENV_FILE"; then
+    echo "[!] ERROR: MONGO_URI is not set in $ENV_FILE."
+    echo "    See $BASE_DIR/.env.example for setup instructions."
+    exit 1
+fi
+# --- end pre-flight check ---
 
 # لاگ کردن با تاریخ
 LOG_DIR="$BASE_DIR/logs"

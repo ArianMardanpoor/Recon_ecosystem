@@ -24,9 +24,9 @@ step "[2/7] Go recon tools (subfinder, katana, nuclei, httpx, dnsx, assetfinder,
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install -v github.com/tomnomnom/assetfinder@latest
 go install -v github.com/lc/gau/v2/cmd/gau@latest
 go install -v github.com/tomnomnom/waybackurls@latest
 check "projectdiscovery/go tools"
@@ -55,7 +55,7 @@ if ! command -v x8 &> /dev/null; then
 fi
 check "x8"
 
-go install -v github.com/0xY9/fallparams@latest
+go install github.com/ImAyrix/fallparams@latest
 check "fallparams"
 
 # copy any freshly-built go binaries into a system-wide path too (belt & suspenders)
