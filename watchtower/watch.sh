@@ -1,10 +1,17 @@
 #!/bin/zsh
-source venv/bin/activate
 # توقف اجرای اسکریپت در صورت بروز هرگونه خطای حیاتی در دستورات (جلوگیری از اجرای مراحل بعدی روی دیتای ناقص)
 set -e
 
-# آدرس‌دهی مطلق (Absolute Path) برای جلوگیری از خطای پیدا نشدن فایل‌ها
-BASE_DIR="/workspaces/Recon_ecosystem/watchtower"
+# آدرس‌دهی مطلق (Absolute Path) — به‌جای هاردکد کردن مسیر، خودش را از محل
+# فیزیکی این اسکریپت پیدا می‌کند، پس چه لوکال (~/Recon_ecosystem) چه در
+# Codespaces (/workspaces/Recon_ecosystem) بدون تغییر کار می‌کند.
+# ${(%):-%N} مخصوص zsh است؛ ${BASH_SOURCE[0]} برای سازگاری با bash.
+SCRIPT_PATH="${(%):-%N}"
+if [ -z "$SCRIPT_PATH" ]; then
+    SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+fi
+BASE_DIR="$(cd "$(dirname "$SCRIPT_PATH")" &> /dev/null && pwd)"
+
 source "$BASE_DIR/venv/bin/activate"
 
 # --- Pre-flight check: fail fast with a readable message instead of a
