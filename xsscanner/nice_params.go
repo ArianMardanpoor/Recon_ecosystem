@@ -268,19 +268,6 @@ func checkTool(toolName string) error {
 }
 
 // ─── fallparams — Contextual Wordlist Generator ────────────────────────────────
-//
-// fallparams passively regex-extracts strings from DOM/JS. This is inherently
-// noisy (JS variable names, CSS classes, etc.), so its output is NEVER treated
-// as a final, valid parameter list. There is intentionally NO volume gate here
-// — a page that mentions 500 candidate words is not "junk", it's context. The
-// noise is filtered downstream by x8's behavioral (diff-based) analysis, which
-// is a far better noise filter than an arbitrary line-count cutoff.
-//
-// isCandidateWord is deliberately loose: we only reject things that would
-// break a line-based wordlist file (empty lines, embedded whitespace) or are
-// obviously not word-like (absurdly long strings, raw paths). Anything that
-// looks even remotely like a parameter name is passed through — x8 decides
-// what's real.
 
 func isCandidateWord(w string) bool {
 	if w == "" || len(w) > 100 {
@@ -314,7 +301,6 @@ func runFallparams(ctx context.Context, rawURL string, silent bool) ([]string, e
 	cmd.Dir = runDir
 
 	_, _ = cmd.CombinedOutput()
-	// Ignore runErr here as we check the output file
 
 	fallOutPath := filepath.Join(runDir, "parameters.txt")
 	content, err := os.ReadFile(fallOutPath)
@@ -349,11 +335,6 @@ func runFallparams(ctx context.Context, rawURL string, silent bool) ([]string, e
 
 // ─── Wordlist Merging ──────────────────────────────────────────────────────────
 
-// buildCombinedWordlist merges fallparams' contextual candidate words with the
-// base x8 wordlist (-w flag) into a single temporary wordlist file. This lets
-// x8's behavioral/diff analysis naturally filter out the junk JS variables and
-// CSS classes that fallparams' passive regex extraction inevitably picks up —
-// x8 only "finds" a param if the target actually reacts to it.
 func buildCombinedWordlist(baseWordlist string, candidates []string) (string, int, error) {
 	base, err := os.ReadFile(baseWordlist)
 	if err != nil {
@@ -457,10 +438,10 @@ func runX8(ctx context.Context, rawURL, wordlist string, silent bool) ([]string,
 		"-u", rawURL,
 		"-w", wordlist,
 		"-o", tmpFile,
-		"-c", "5", // کاهش شدید کانکارنسی (پیش‌فرض خیلی بالاست)
-		"--delay", "1", // یک ثانیه وقفه بین ریکوئست‌ها برای فریب WAF
-		"--timeout", "15", // افزایش تایم‌اوت برای کانکشن‌های کند
-		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // جلوگیری از بلاک شدن هدر پیش‌فرض x8
+		"-c", "5",
+		"--delay", "1",
+		"--timeout", "15",
+		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}
 	cmd := exec.CommandContext(ctx, "x8", args...)
 
@@ -517,8 +498,6 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 	var fallErr, x8Err error
 	var candidates []string
 
-	// Stage 1: fallparams as a contextual wordlist generator. Its output is
-	// NOT final — it's raw material for x8's wordlist.
 	if !cfg.NoFall {
 		words, err := runFallparams(toolCtx, rawURL, cfg.Silent)
 		if err != nil {
@@ -536,8 +515,6 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 	if !cfg.NoX8 {
 		x8Wordlist := cfg.Wordlist
 
-		// Stage 2: merge fallparams' candidate words into the base x8
-		// wordlist to build a per-target combined wordlist.
 		if len(candidates) > 0 {
 			combinedPath, added, buildErr := buildCombinedWordlist(cfg.Wordlist, candidates)
 			if buildErr != nil {
@@ -549,9 +526,7 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 				}
 			} else {
 				x8Wordlist = combinedPath
-				registerTemp(combinedPath) // safety net if process is interrupted
-				// Stage 4: guarantee cleanup of this target's temp combined
-				// wordlist as soon as x8 finishes with it, regardless of outcome.
+				registerTemp(combinedPath)
 				defer func() {
 					if !cfg.KeepTemp {
 						os.Remove(combinedPath)
@@ -563,8 +538,6 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 			}
 		}
 
-		// Stage 3: x8 runs its behavioral/diff analysis against the combined
-		// wordlist, naturally filtering out the noise fallparams picked up.
 		params, err := runX8(toolCtx, rawURL, x8Wordlist, cfg.Silent)
 		if err != nil {
 			x8Err = fmt.Errorf("x8 error for %s: %v", rawURL, err)
@@ -577,9 +550,6 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 			res.X8Params = params
 		}
 	} else if len(candidates) > 0 {
-		// x8 explicitly skipped (-no-x8): nothing left to behaviorally filter
-		// the candidates, so fall back to treating them as final params
-		// (with strict validity filtering applied at write time).
 		res.FallParams = candidates
 	}
 
@@ -706,7 +676,7 @@ func main() {
 	flag.StringVar(&cfg.URLFile, "file", "", "File with list of URLs (alias)")
 	flag.StringVar(&cfg.OutDir, "d", "results/params", "Output directory to save <HOST>-param.txt files")
 	flag.StringVar(&cfg.OutDir, "dir", "results/params", "Output directory (alias)")
-	flag.StringVar(&cfg.Wordlist, "w", "", "Wordlist for x8 (default: ~/wordlist/param.txt)")
+	flag.StringVar(&cfg.Wordlist, "w", "", "Wordlist for x8 (default: param.txt next to nice_params)")
 	flag.BoolVar(&cfg.Silent, "silent", false, "No terminal output (machine-friendly)")
 	flag.BoolVar(&cfg.KeepTemp, "keep-temp", false, "Keep temporary files after exit")
 	flag.IntVar(&cfg.Threads, "t", 5, "Concurrent workers (for -f mode)")
@@ -735,13 +705,20 @@ func main() {
 		printError(fmt.Sprintf("reporter init failed: %v", err))
 		os.Exit(1)
 	}
+
 	if cfg.Wordlist == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			printError("cannot determine home directory")
-			os.Exit(1)
+		// ابتدا بررسی دایرکتوری محل قرارگیری خود فایل اجرایی (بهینه برای فایل کامپایل‌شده)
+		exePath, err := os.Executable()
+		if err == nil {
+			target := filepath.Join(filepath.Dir(exePath), "param.txt")
+			if _, err := os.Stat(target); err == nil {
+				cfg.Wordlist = target
+			}
 		}
-		cfg.Wordlist = filepath.Join(home, "wordlist", "param.txt")
+		// اگر در مسیر بالا پیدا نشد (مثلا موقع کار با go run)، مستقیماً در دایرکتوری فعلی ترمینال دنبالش می‌گردد
+		if cfg.Wordlist == "" {
+			cfg.Wordlist = "param.txt"
+		}
 	}
 
 	if cfg.URL != "" && cfg.URLFile != "" {
@@ -759,7 +736,6 @@ func main() {
 		cfg.Threads = 1
 	}
 
-	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(cfg.OutDir, 0755); err != nil {
 		printError(fmt.Sprintf("failed to create output directory: %v", err))
 		os.Exit(1)
@@ -780,7 +756,6 @@ func main() {
 		defer cleanup()
 	}
 
-	// Check for required tools only if they are not skipped
 	if !cfg.NoFall {
 		if err := checkTool("fallparams"); err != nil {
 			printError(err.Error())
