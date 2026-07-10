@@ -81,41 +81,42 @@ def scan_json(directory: Path):
             logger.exception(f"Unexpected error processing {file_path.name}: {e}")
 
 def scan_skipped(directory: Path):
-    """اسکن دایرکتوری skipped برای حذف برنامه‌ها از دیتابیس"""
     skipped_dir = directory / "skipped"
-    
+    processed_dir = skipped_dir / "processed"
+
     if not skipped_dir.exists() or not skipped_dir.is_dir():
         logger.info("Skipped directory not found. Skipping deletion process.")
         return
 
+    processed_dir.mkdir(exist_ok=True)
+
     for file_path in skipped_dir.glob('*.json'):
         logger.info(f"Processing skipped file: {file_path.name}")
-        
+
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 data = json.load(file)
                 program_name = data.get("program_name")
-                
+
                 if program_name:
                     delete_program(program_name)
                     logger.info(f"Successfully deleted from database: {program_name}")
+                    # فایل رو به پوشه‌ی processed منتقل کن تا دوباره اجرا نشه
+                    file_path.rename(processed_dir / file_path.name)
                 else:
                     logger.warning(f"File {file_path.name} in skipped dir lacks 'program_name'.")
-        
+
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in skipped file {file_path.name}: {e}")
         except Exception as e:
             logger.exception(f"Unexpected error processing skipped {file_path.name}: {e}")
-
+            
 if __name__ == "__main__":
-    # اطمینان از اینکه scan_dir از نوع آبجکت Path است
-    scan_dir = Path(config.PROGRAMS_DIR)
-    
-    logger.info(f"Starting sync from directory: {scan_dir}")
-    # 1. پردازش برنامه‌های جدید یا آپدیت شده
-    scan_json(scan_dir)
-    
-    # 2. پردازش دایرکتوری skipped که بغل همین فایل پایتون قرار داره
     base_script_dir = Path(__file__).parent
-    logger.info(f"Checking for skipped programs in: {base_script_dir / 'skipped'}")
+    scan_dir = base_script_dir / "Programs"
+
+    logger.info(f"Starting sync from directory: {scan_dir.resolve()}")
+    scan_json(scan_dir)
+
+    logger.info(f"Checking for skipped programs in: {(base_script_dir / 'skipped').resolve()}")
     scan_skipped(base_script_dir)
