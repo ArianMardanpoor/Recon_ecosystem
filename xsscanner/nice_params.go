@@ -438,8 +438,8 @@ func runX8(ctx context.Context, rawURL, wordlist string, silent bool) ([]string,
 		"-u", rawURL,
 		"-w", wordlist,
 		"-o", tmpFile,
-		"-c", "5",
-		"--delay", "1",
+		"-c", "5",        // کانکارنسی ۵ بسیار عالی و چراغ‌خاموش است
+		"--delay", "1000", // اصلاح شد: ۱۰۰۰ میلی‌ثانیه معادل ۱ ثانیه تاخیر واقعی
 		"--timeout", "15",
 		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 	}

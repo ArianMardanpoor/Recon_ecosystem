@@ -40,9 +40,12 @@ func runNiceKatana(targetURL, outDir string) {
 		"-known-files", "all",
 		"-automatic-form-fill",
 		"-extension-filter", extFilter,
-		"-rl", "50", // rate limit: max 50 req/sec, avoids WAF bans
-		"-retry", "3", // retry transient failures instead of hammering
-		"-timeout", "10", // per-request timeout, avoid hanging connections
+		"-c", "4",          // محدود کردن کانکشن‌های همزمان برای جلوگیری از رفتار تهاجمی
+		"-rl", "12",        // کاهش نرخ درخواست به ۱۲ ریکوئست در ثانیه برای کیپ‌کالم نگه داشتن کلاودفلر
+		"-delay", "1s",     // اضافه کردن تاخیر بین درخواست‌ها (بسته به میزان حساسیت تارگت)
+		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // ماسک کردن هویت ابزار
+		"-retry", "3",      // تلاش مجدد برای خطاهای گذرا
+		"-timeout", "10",   // تایم‌اوت هر ریکوئست
 		"-silent",
 		"-o", katanaOutput,
 	}
