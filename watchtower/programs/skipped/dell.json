@@ -1,6 +1,0 @@
-{
-  "program_name": "dell",
-  "scopes": ["dell.com", "delltechnologies.com", ""],
-  "outofscope":["https://console.delltechnologies.com", "educate.dell.com","console.dell.com","console-test.dell.com",
-"salesproductivity.dell.com"]
-}

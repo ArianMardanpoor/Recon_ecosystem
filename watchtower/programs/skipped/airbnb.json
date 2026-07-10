@@ -1,5 +1,0 @@
-{
-  "program_name": "airbnb",
-  "scopes": ["musta.ch", "muscache.com", "luxuryretreats.com", "hoteltonight.com", "hoteltonight-test.com", "byairbnb.com", "atairbnb.com", "airbnbpayments.com", "airbnbcitizen.com", "airbnb.org", "airbnb.com", "airbnb-aws.com"],
-  "outofscope":[]
-}

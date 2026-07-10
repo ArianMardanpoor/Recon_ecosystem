@@ -7,6 +7,9 @@ import tempfile
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, Subdomains, upsert_live, current_time
 from utils.safe_subprocess import run_command_safe
+from utils.wildcard_filter import filter_wildcards
+
+DNSX_BASE_FLAGS = ["-silent", "-resp", "-json", "-r", "8.8.8.8,1.1.1.1", "-t", "50", "-rl", "100"]
 
 if __name__ == "__main__":
     programs = Programs.objects.all()
@@ -22,23 +25,20 @@ if __name__ == "__main__":
                         temp_file.write(f"{sub.subdomain}\n")
                     temp_file_path = temp_file.name
 
-                command = [
-                    "dnsx", "-l", temp_file_path, "-silent", "-resp", "-json",
-                    "-r", "8.8.8.8,1.1.1.1", "-t", "50", "-rl", "100"
-                ]
+                command = ["dnsx", "-l", temp_file_path] + DNSX_BASE_FLAGS
 
+                live_map = {}
                 results = run_command_safe(command)
                 if results:
                     for line in results:
-                        if not line.strip(): continue
+                        if not line.strip():
+                            continue
                         try:
                             obj = json.loads(line.strip())
-                            upsert_live({
-                                'subdomain': obj.get('host', ''),
-                                'scope': scope,
-                                'ips': obj.get('a', []),
-                                'cdn': ''
-                            })
+                            host = obj.get('host', '')
+                            ips = obj.get('a', [])
+                            if host:
+                                live_map[host] = ips
                         except Exception as e:
                             print(f"[{current_time()}] Error parsing dnsx line: {e}")
 
@@ -46,5 +46,22 @@ if __name__ == "__main__":
                     os.unlink(temp_file_path)
                 except:
                     pass
+
+                if not live_map:
+                    print(f"[{current_time()}] {scope}: 0 live")
+                    continue
+
+                genuine_map, discarded = filter_wildcards(live_map)
+
+                for host, ips in genuine_map.items():
+                    upsert_live({
+                        'subdomain': host,
+                        'scope': scope,
+                        'ips': ips,
+                        'cdn': ''
+                    })
+
+                print(f"[{current_time()}] {scope}: {len(genuine_map)} genuine live, "
+                      f"{discarded} discarded (wildcard noise)")
             else:
                 print(f"[{current_time()}] No subdomains found in DB for scope: {scope}")
