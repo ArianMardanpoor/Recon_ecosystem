@@ -3,18 +3,24 @@ import os
 import sys
 import json
 import logging
-import re
 from pathlib import Path
 
 # اضافه کردن مسیر روت پروژه به sys.path برای ایمپورت‌های تمیزتر
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# ایمپورت تابع delete_program اضافه شد
 from database.db import upsert_program, delete_program
-import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SyncProgram")
+
+# ------------------------------------------------------------------
+# مسیرها به صورت مستقیم نسبت به خود اسکریپت ست شدن (بدون config)
+# ------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent
+PROGRAMS_DIR = BASE_DIR / "Programs"
+SKIPPED_DIR = BASE_DIR / "skipped"
+SKIPPED_PROCESSED_DIR = SKIPPED_DIR / "processed"
+
 
 def parse_scopes(scopes):
     """
@@ -32,7 +38,6 @@ def parse_scopes(scopes):
 
         # استخراج دامین پایه برای مراحل ریکان
         if '*' in scope:
-            # گرفتن بخش بعد از آخرین ستاره و حذف دات‌های اضافی
             base = scope.split('*')[-1].strip('.')
             if base:
                 recon_domains.add(base)
@@ -41,56 +46,69 @@ def parse_scopes(scopes):
 
     return list(recon_domains), regex_patterns
 
+
 def scan_json(directory: Path):
-    """اسکن دایرکتوری برای فایل‌های JSON برنامه‌ها"""
+    """اسکن دایرکتوری برای فایل‌های JSON برنامه‌ها (افزودن/آپدیت)"""
     if not directory.exists() or not directory.is_dir():
-        logger.error(f"Directory not found or invalid: {directory}")
+        logger.error(f"Directory not found or invalid: {directory.resolve()}")
         return
-    
-    for file_path in directory.glob('*.json'):
+
+    json_files = list(directory.glob('*.json'))
+    if not json_files:
+        logger.warning(f"No JSON files found in: {directory.resolve()}")
+        return
+
+    logger.info(f"Found {len(json_files)} program file(s) in: {directory.resolve()}")
+
+    for file_path in json_files:
         logger.info(f"Processing program file: {file_path.name}")
-        
+
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 data = json.load(file)
-                
+
                 program_name = data.get("program_name")
                 scopes = data.get("scopes", [])
-                
+
                 # پشتیبانی از هر دو فرمت outofscope و outofscopes
                 outofscopes = data.get("outofscope", data.get("outofscopes", []))
                 config_data = data.get("config", {})
-                
+
                 if program_name:
-                    # تفکیک اسکوپ‌های ریکان و ساخت رجکس‌ها
                     recon_scopes, regex_filters = parse_scopes(scopes)
-                    
-                    # ذخیره رجکس‌ها و اسکوپ‌های اصلی توی کانفیگ برای استفاده ابزارهای بعدی
+
                     config_data["regex_filters"] = regex_filters
                     config_data["original_scopes"] = scopes
 
-                    # پاس دادن دامین‌های تمیز شده (recon_scopes) به دیتابیس
                     upsert_program(program_name, recon_scopes, outofscopes, config_data)
                     logger.info(f"Successfully upserted: {program_name}")
                 else:
                     logger.warning(f"File {file_path.name} is missing 'program_name' field. Skipped.")
-                    
+
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in file {file_path.name}: {e}")
         except Exception as e:
             logger.exception(f"Unexpected error processing {file_path.name}: {e}")
 
-def scan_skipped(directory: Path):
-    skipped_dir = directory / "skipped"
-    processed_dir = skipped_dir / "processed"
 
-    if not skipped_dir.exists() or not skipped_dir.is_dir():
-        logger.info("Skipped directory not found. Skipping deletion process.")
+def scan_skipped():
+    """
+    اسکن دایرکتوری skipped برای حذف برنامه‌ها از دیتابیس.
+    بعد از حذف موفق، فایل به skipped/processed منتقل می‌شه تا
+    دفعه‌ی بعد دوباره پردازش نشه.
+    """
+    if not SKIPPED_DIR.exists() or not SKIPPED_DIR.is_dir():
+        logger.info(f"Skipped directory not found: {SKIPPED_DIR.resolve()}. Skipping deletion process.")
         return
 
-    processed_dir.mkdir(exist_ok=True)
+    json_files = list(SKIPPED_DIR.glob('*.json'))
+    if not json_files:
+        logger.info("No skipped files to process.")
+        return
 
-    for file_path in skipped_dir.glob('*.json'):
+    SKIPPED_PROCESSED_DIR.mkdir(exist_ok=True)
+
+    for file_path in json_files:
         logger.info(f"Processing skipped file: {file_path.name}")
 
         try:
@@ -101,8 +119,11 @@ def scan_skipped(directory: Path):
                 if program_name:
                     delete_program(program_name)
                     logger.info(f"Successfully deleted from database: {program_name}")
-                    # فایل رو به پوشه‌ی processed منتقل کن تا دوباره اجرا نشه
-                    file_path.rename(processed_dir / file_path.name)
+
+                    # جابجایی فایل به processed تا دیگه دوباره خونده نشه
+                    destination = SKIPPED_PROCESSED_DIR / file_path.name
+                    file_path.rename(destination)
+                    logger.info(f"Moved to: {destination.resolve()}")
                 else:
                     logger.warning(f"File {file_path.name} in skipped dir lacks 'program_name'.")
 
@@ -110,13 +131,13 @@ def scan_skipped(directory: Path):
             logger.error(f"Invalid JSON in skipped file {file_path.name}: {e}")
         except Exception as e:
             logger.exception(f"Unexpected error processing skipped {file_path.name}: {e}")
-            
+
+
 if __name__ == "__main__":
-    base_script_dir = Path(__file__).parent
-    scan_dir = base_script_dir / "Programs"
+    logger.info(f"Starting sync from directory: {PROGRAMS_DIR.resolve()}")
+    scan_json(PROGRAMS_DIR)
 
-    logger.info(f"Starting sync from directory: {scan_dir.resolve()}")
-    scan_json(scan_dir)
+    logger.info(f"Checking for skipped programs in: {SKIPPED_DIR.resolve()}")
+    scan_skipped()
 
-    logger.info(f"Checking for skipped programs in: {(base_script_dir / 'skipped').resolve()}")
-    scan_skipped(base_script_dir)
+    logger.info("Sync finished.")
