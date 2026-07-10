@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -137,11 +138,16 @@ func markAsScanned(urlStr string) {
 	logMsg(fmt.Sprintf("Target marked as scanned: %s", urlStr), M_green)
 }
 
-func runBinary(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+// تغییر عملکرد: افزودن پشتیبانی از Context برای مدیریت زمان اجرای باینری‌ها
+func runBinaryWithContext(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runBinary(name string, args ...string) error {
+	return runBinaryWithContext(context.Background(), name, args...)
 }
 
 func getSafeName(u string) string {
@@ -163,6 +169,7 @@ func countLines(path string) int {
 	}
 	return n
 }
+
 func countLinesInDir(dir string) int {
 	total := 0
 	entries, err := os.ReadDir(dir)
@@ -206,17 +213,27 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	katanaOutFile := filepath.Join(katanaDir, safeURL+"-katana.txt")
 
 	if !noCrawl {
-		// STEP 1: Passive discovery (must finish before anything else starts)
+		// STEP 1: Passive discovery
 		logMsg(fmt.Sprintf("[1/3] Running nice_passive for %s", target), M_gray)
 		if err := runBinary("./nice_passive", "-o", passiveDir, hostname); err != nil {
 			logMsg(fmt.Sprintf("nice_passive failed for %s: %v", target, err), M_red)
 		}
 
-		// STEP 2: Katana runs ONLY on the unique output of passive phase
+		// STEP 2: Katana runs with an explicit safety timeout
 		if countLines(passiveOutFile) > 0 {
 			logMsg(fmt.Sprintf("[2/3] Running nice_katana on passive results for %s", target), M_gray)
-			if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
-				logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+
+			// ایجاد یک محدودیت زمانی حداکثر ۳ دقیقه‌ای برای اتمام کار کاتانا روی این ساب‌دومین
+			katanaCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			err := runBinaryWithContext(katanaCtx, "./nice_katana", "-o", katanaDir, passiveOutFile)
+			cancel() // آزادسازی کانتکست بلافاصله پس از پایان کار
+
+			if err != nil {
+				if katanaCtx.Err() == context.DeadlineExceeded {
+					logMsg(fmt.Sprintf("nice_katana TIMED OUT (3m limit reached) for %s. Forcing pipeline forward.", target), M_red)
+				} else {
+					logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+				}
 			}
 		} else {
 			logMsg(fmt.Sprintf("No passive URLs found for %s, skipping Katana", target), M_gray)
@@ -364,7 +381,7 @@ func main() {
 
 	reporter.PrintDashboard(reporter.DashboardStats{
 		TargetsScanned:   len(newTargets),
-		PassiveURLs:      countLinesInDir(filepath.Join(globalOutputDir, "passive")), // adjust if you track per-target totals instead
+		PassiveURLs:      countLinesInDir(filepath.Join(globalOutputDir, "passive")),
 		ParamsDiscovered: len(findings),
 		VulnsFound:       vulnCount,
 		ReportPath:       mdPath,
