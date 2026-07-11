@@ -373,74 +373,71 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 		if err := runBinary("./nice_params", "-u", target, "-d", paramsDir); err != nil {
 			logMsg(fmt.Sprintf("nice_params failed for %s: %v", target, err), M_red)
 		}
+	} // پایان شرط if !noCrawl
 
-		// Aggregate results and run xssniper
-		logMsg(fmt.Sprintf("Launching XSSniper for %s", target), M_cyan)
+	// Aggregate results and run xssniper
+	logMsg(fmt.Sprintf("Launching XSSniper for %s", target), M_cyan)
 
-		jobFile := filepath.Join(globalOutputDir, fmt.Sprintf("job_%s.txt", safeURL+"_"+time.Now().Format("20060102150405")))
-		paramFilePath := filepath.Join(paramsDir, hostname+"-param.txt")
+	jobFile := filepath.Join(globalOutputDir, fmt.Sprintf("job_%s.txt", safeURL+"_"+time.Now().Format("20060102150405")))
+	paramFilePath := filepath.Join(paramsDir, hostname+"-param.txt")
 
-		f, err := os.Create(jobFile)
-		if err == nil {
-			defer f.Close()
-			f.WriteString(target + "\n")
+	f, err := os.Create(jobFile)
+	if err == nil {
+		defer f.Close()
+		f.WriteString(target + "\n")
 
-			appendSafe := func(path string) {
-				pFile, err := os.Open(path)
-				if err != nil {
-					return
-				}
-				defer pFile.Close()
-				scanner := bufio.NewScanner(pFile)
-				for scanner.Scan() {
-					line := strings.TrimSpace(scanner.Text())
-					if line == "" {
-						continue
-					}
-					if lURL, err := url.Parse(line); err == nil {
-						lHost := lURL.Hostname()
-						if lHost != rootDomain && !strings.HasSuffix(lHost, "."+rootDomain) {
-							continue
-						}
-					} else {
-						continue
-					}
-					if !utils.IsGoodURL(line) {
-						continue
-					}
-					f.WriteString(line + "\n")
-				}
+		appendSafe := func(path string) {
+			pFile, err := os.Open(path)
+			if err != nil {
+				return
 			}
-
-			if !noCrawl {
-				appendSafe(passiveOutFile)
-				appendSafe(katanaOutFile)
+			defer pFile.Close()
+			scanner := bufio.NewScanner(pFile)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line == "" {
+					continue
+				}
+				if lURL, err := url.Parse(line); err == nil {
+					lHost := lURL.Hostname()
+					if lHost != rootDomain && !strings.HasSuffix(lHost, "."+rootDomain) {
+						continue
+					}
+				} else {
+					continue
+				}
+				if !utils.IsGoodURL(line) {
+					continue
+				}
+				f.WriteString(line + "\n")
 			}
 		}
 
-		args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3"}
-		if isSingleTarget {
-			args = append(args, "-u", target)
+		if !noCrawl {
+			appendSafe(passiveOutFile)
+			appendSafe(katanaOutFile)
 		}
-		if skipSPA {
-			args = append(args, "-skip-spa")
-		}
-		args = append(args, "-phase", fmt.Sprintf("%d", phase))
-
-		runBinary("./xssniper", args...)
-
-<<<<<<< HEAD
-		markAsScanned(target)
 	}
-=======
+
+	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3"}
+	if isSingleTarget {
+		args = append(args, "-u", target)
+	}
+	if skipSPA {
+		args = append(args, "-skip-spa")
+	}
+	args = append(args, "-phase", fmt.Sprintf("%d", phase))
+
+	// اجرای xssniper (فقط یک‌بار)
 	runBinary("./xssniper", args...)
 
-	// [تغییر جدید] اجرای پایپ‌لاین اینجکشن دیتابیس بلافاصله پس از اتمام کار xssniper برای تارگت جاری
+	// پایپ‌لاین اینجکشن دیتابیس بلافاصله پس از اتمام کار xssniper
 	runIngest(hostname)
 
+	// مارک کردن تارگت به عنوان اسکن شده
 	markAsScanned(target)
->>>>>>> 585fbcebeac7efd4988634e5867d1ba8e682d808
 }
+
 func main() {
 	mode := flag.String("mode", "normal", "Scan mode: normal or fresh")
 	inputFile := flag.String("i", "", "Input file with targets (skips API)")
