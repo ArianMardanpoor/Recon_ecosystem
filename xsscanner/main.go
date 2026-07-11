@@ -248,6 +248,77 @@ func countLinesInDir(dir string) int {
 	return total
 }
 
+// runIngest runs the python database ingestion script per target
+func runIngest(hostname string) {
+	repoRoot := ".."
+	exePath, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exePath)
+		if _, err := os.Stat(filepath.Join(dir, "../watchtower")); err == nil {
+			repoRoot = filepath.Join(dir, "..")
+		} else if _, err := os.Stat(filepath.Join(dir, "watchtower")); err == nil {
+			repoRoot = dir
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, "watchtower")); err != nil {
+		if _, err := os.Stat("watchtower"); err == nil {
+			repoRoot = "."
+		}
+	}
+
+	pythonPath := filepath.Join(repoRoot, "watchtower", "venv", "bin", "python3")
+	if _, err := os.Stat(pythonPath); err != nil {
+		fmt.Fprintf(os.Stderr, "%s[WARNING] watchtower venv python3 not found at %s. Falling back to global python3.%s\n", M_red, pythonPath, M_reset)
+		pythonPath = "python3"
+	}
+
+	scriptPath := filepath.Join(repoRoot, "watchtower", "database", "ingest_results.py")
+
+	// Read watchtower/.env specifically to resolve MONGO_URI
+	envMap := make(map[string]string)
+	watchtowerEnvPath := filepath.Join(repoRoot, "watchtower", ".env")
+	if f, err := os.Open(watchtowerEnvPath); err == nil {
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				val = strings.Trim(val, `"'`)
+				envMap[key] = val
+			}
+		}
+	}
+
+	// Construct environment for the subprocess (Go Process Env + watchtower/.env)
+	cmdEnv := os.Environ()
+	for k, v := range envMap {
+		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	logMsg(fmt.Sprintf("Running database ingestion for %s...", hostname), M_cyan)
+	cmd := exec.Command(pythonPath, scriptPath, hostname, "--workdir", globalOutputDir)
+	cmd.Env = cmdEnv
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Run(); err != nil {
+		logMsg(fmt.Sprintf("ingest_results.py failed for %s: %v\nStderr: %s", hostname, err, strings.TrimSpace(stderrBuf.String())), M_red)
+	} else {
+		outStr := strings.TrimSpace(stdoutBuf.String())
+		if outStr != "" {
+			logMsg(outStr, M_green)
+		}
+	}
+}
+
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
 func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int) {
@@ -358,8 +429,17 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 
 		runBinary("./xssniper", args...)
 
+<<<<<<< HEAD
 		markAsScanned(target)
 	}
+=======
+	runBinary("./xssniper", args...)
+
+	// [تغییر جدید] اجرای پایپ‌لاین اینجکشن دیتابیس بلافاصله پس از اتمام کار xssniper برای تارگت جاری
+	runIngest(hostname)
+
+	markAsScanned(target)
+>>>>>>> 585fbcebeac7efd4988634e5867d1ba8e682d808
 }
 func main() {
 	mode := flag.String("mode", "normal", "Scan mode: normal or fresh")
