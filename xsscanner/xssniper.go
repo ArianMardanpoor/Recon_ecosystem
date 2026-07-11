@@ -81,18 +81,18 @@ func hasClientSideJSRisk(targetURL string) bool {
 		return true // conservative fallback
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; xssniper)")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return true
 	}
 	defer resp.Body.Close()
-	
+
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return true
 	}
-	
+
 	bodyLower := strings.ToLower(string(bodyBytes))
 	return strings.Contains(bodyLower, "<script")
 }
@@ -700,7 +700,7 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 			sb.WriteString("🔎 <b>Candidate findings</b>\n\n")
 			sb.WriteString(fmt.Sprintf("🎯 <b>Target:</b> <code>%s</code>\n", escapeHTML(report.URL)))
 			sb.WriteString(fmt.Sprintf("📅 <b>Time:</b> %s\n\n", ts))
-			
+
 			sb.WriteString("<b>Summary of Findings:</b>\n")
 			if len(report.QueryParameters) > 0 {
 				sb.WriteString(fmt.Sprintf("- Query Parameters: %d\n", len(report.QueryParameters)))
@@ -761,9 +761,7 @@ var (
 	vulnerableTargets    int64
 	vulnerableMap        sync.Map
 	workerLock           sync.Map
-	vulnerableMap     sync.Map
-	workerLock        sync.Map
-	candidateNotified sync.Map
+	candidateNotified    sync.Map
 	nucleiExists         bool
 	domSinkCheckerExists bool
 	skipSPA              bool
@@ -851,7 +849,7 @@ func isTargetAlive(targetURL string) bool {
 		}
 		return nil
 	}
-	
+
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return false
@@ -1015,7 +1013,7 @@ func isGenericReflector(targetURL string) bool {
 		}
 		return nil
 	}
-	
+
 	req, err := http.NewRequest("GET", finalURL, nil)
 	if err != nil {
 		return false
@@ -1121,7 +1119,7 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 		return false
 	}
 	defer resp.Body.Close()
-	
+
 	b, _ := io.ReadAll(resp.Body)
 	return strings.Contains(string(b), payload)
 }
@@ -1296,14 +1294,14 @@ func processURL(targetURL string, index, total int) {
 
 	for pf, probePhase := range probeFiles {
 		if _, err := os.Stat(pf); err == nil {
-			
+
 			// TECH-AWARE: Skip Header parsing logic if SPA
 			if probePhase == "header" {
 				if profile.IsSPA && !forceAll {
 					logLine("SKIP-TECH", X_cyan, "Skipping header injection for %s due to detected SPA tech: %s", targetURL, techFlag)
 					continue
 				}
-				
+
 				file, err := os.Open(pf)
 				if err != nil {
 					continue
@@ -1838,9 +1836,9 @@ func main() {
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
 	flag.Parse()
 	ratelimit.StartServer()
-    
-    // ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
-    _ = ratelimit.LoadProxies("proxies.txt")
+
+	// ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
+	_ = ratelimit.LoadProxies("proxies.txt")
 	var err error
 	repLogger, err = reporter.NewLogger("results/raw_findings.jsonl")
 	if err != nil {
