@@ -50,7 +50,7 @@ xsscanner/x9
 xsscanner/dom_sink_checker
 xsscanner/xssniper
 xsscanner/xsscanner
-
+xsscanner/.env
 # Database temporary files
 watchtower/database/db_data/
 
