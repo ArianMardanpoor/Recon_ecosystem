@@ -408,7 +408,7 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
     
     # Only call upsert_scan_findings if we have findings
     if all_findings:
-        # The scan_status will be computed by db.py's upsert_scan_findings
+
         upsert_scan_findings(hostname, all_findings, scan_status="pending")
         
         # Determine scan_status for summary (simplified)
@@ -419,10 +419,8 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             scan_status = 'findings'
         else:
             scan_status = 'clean'
-    else:
-        scan_status = 'clean'
-    
-    return stats, scan_status
+        
+        return stats, scan_status
 
 
 # ============================================================================
