@@ -1,34 +1,14 @@
 from mongoengine import Document, StringField, DateTimeField, ListField, DictField, IntField, BooleanField, connect
 from pymongo import UpdateOne  # اضافه شده برای عملیات گروهی و پرسرعت
 from datetime import datetime
-from dotenv import load_dotenv
 import tldextract
 import os
 import sys
 import re
-from dotenv import load_dotenv
 
 # ایمپورت notify با مسیر نسبی
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from utils.notify import queue_new_http, queue_http_change
-
-# ==========================================
-# Environment loading (works identically in local dev and Codespaces)
-# ==========================================
-# BASE_DIR = watchtower/ (parent of this database/ folder)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise RuntimeError(
-        "MONGO_URI is not set.\n"
-        "Copy watchtower/.env.example to watchtower/.env and set MONGO_URI "
-        "before running any watch_* script or app.py.\n"
-        "  cp watchtower/.env.example watchtower/.env\n"
-        "  # then edit watchtower/.env and fill in MONGO_URI"
-    )
-
 
 def current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -36,7 +16,7 @@ def current_time():
 # اتصال به MongoDB
 connect(
     db="watchtower",
-    host=MONGO_URI,
+    host="mongodb://localhost:27017/watchtower",
     alias="default"
 )
 
@@ -135,6 +115,15 @@ class Http(Document):
     final_url = StringField()
     favicon = StringField()
     tested = BooleanField(default=False)  # اضافه شدن فیلد tested
+    
+    # New Recon/XSS Pipeline Artifacts
+    passive_urls = ListField(StringField(), default=[])
+    crawled_urls = ListField(StringField(), default=[])
+    discovered_params = ListField(StringField(), default=[])
+    last_scan_date = DateTimeField(default=None, null=True)
+    scan_status = StringField(default="not_scanned")
+    findings = ListField(DictField(), default=[])
+    
     last_update = DateTimeField(default=datetime.now)
     created_date = DateTimeField(default=datetime.now)
     
@@ -382,5 +371,77 @@ def upsert_http(obj):
             tech=obj.get('tech', []),
             ips=obj.get('ips', []),
         )
+    
+    return True
+
+
+def upsert_scan_artifacts(subdomain, passive_urls=None, crawled_urls=None, discovered_params=None):
+    """درج یا بروزرسانی نتایج پایپ‌لاین اسکن برای یک ساب‌دامین"""
+    http_doc = Http.objects(subdomain=subdomain).first()
+    
+    if not http_doc:
+        print(f"[{current_time()}] Warning: Cannot upsert scan artifacts. Http doc not found for: {subdomain}")
+        return False
+        
+    if passive_urls is not None:
+        http_doc.passive_urls = list(set(passive_urls))
+    if crawled_urls is not None:
+        http_doc.crawled_urls = list(set(crawled_urls))
+    if discovered_params is not None:
+        http_doc.discovered_params = list(set(discovered_params))
+        
+    http_doc.last_update = datetime.now()
+    http_doc.save()
+    
+    return True
+
+
+def upsert_scan_findings(subdomain, findings_list, scan_status, force=False):
+    """درج یا بروزرسانی یافته‌های آسیب‌پذیری پایپ‌لاین"""
+    http_doc = Http.objects(subdomain=subdomain).first()
+    
+    if not http_doc:
+        print(f"[{current_time()}] Warning: Cannot upsert findings. Http doc not found for: {subdomain}")
+        return False
+
+    confidence_weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+    
+    # Merge findings deduped by (parameter, discovery_source, reflection_type)
+    merged_findings = {}
+    for f in http_doc.findings:
+        key = (f.get('parameter'), f.get('discovery_source'), f.get('reflection_type'))
+        merged_findings[key] = f
+
+    for new_f in findings_list:
+        key = (new_f.get('parameter'), new_f.get('discovery_source'), new_f.get('reflection_type'))
+        if key in merged_findings:
+            existing_conf_val = confidence_weights.get(str(merged_findings[key].get('confidence')).upper(), 0)
+            new_conf_val = confidence_weights.get(str(new_f.get('confidence')).upper(), 0)
+            
+            # Keep the one with higher confidence
+            if new_conf_val > existing_conf_val:
+                merged_findings[key] = new_f
+        else:
+            merged_findings[key] = new_f
+            
+    http_doc.findings = list(merged_findings.values())
+    
+    # Determine new scan status based on merged findings
+    calculated_status = "clean"
+    if http_doc.findings:
+        calculated_status = "findings"
+        if any(str(f.get('confidence')).upper() == 'HIGH' for f in http_doc.findings):
+            calculated_status = "confirmed_vuln"
+            
+    # Protect from downgrade unless forced
+    if not force and http_doc.scan_status == "confirmed_vuln" and calculated_status != "confirmed_vuln":
+        new_status = "confirmed_vuln"
+    else:
+        new_status = calculated_status
+        
+    http_doc.scan_status = new_status
+    http_doc.last_scan_date = datetime.now()
+    http_doc.last_update = datetime.now()
+    http_doc.save()
     
     return True

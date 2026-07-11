@@ -112,6 +112,7 @@ def serialize_live(l):
 
 
 def serialize_http(h, providers=None):
+    findings_list = getattr(h, 'findings', [])
     return {
         'subdomain': h.subdomain,
         'program_name': h.program_name,
@@ -124,11 +125,33 @@ def serialize_http(h, providers=None):
         'ips': h.ips,
         'headers': h.headers,
         'favicon': h.favicon,
-        'tested': getattr(h, 'tested', False),  # اضافه شد
+        'tested': getattr(h, 'tested', False),
         'providers': providers or [],
+        # اضافه شدن فیلدهای جدید اسکن
+        'passive_urls': getattr(h, 'passive_urls', []),
+        'crawled_urls': getattr(h, 'crawled_urls', []),
+        'discovered_params': getattr(h, 'discovered_params', []),
+        'scan_status': getattr(h, 'scan_status', 'not_scanned'),
+        'last_scan_date': h.last_scan_date.strftime('%Y-%m-%d %H:%M:%S') if getattr(h, 'last_scan_date', None) else None,
+        'findings_count': len(findings_list),
+        'findings_summary': [
+            {
+                'parameter': f.get('parameter'),
+                'confidence': f.get('confidence'),
+                'discovery_source': f.get('discovery_source')
+            } for f in findings_list
+        ],
         'created_date': h.created_date.strftime('%Y-%m-%d %H:%M:%S') if h.created_date else None,
         'last_update': h.last_update.strftime('%Y-%m-%d %H:%M:%S') if h.last_update else None
     }
+
+
+def serialize_http_detail(h, providers=None):
+    base_data = serialize_http(h, providers)
+    # حذف خلاصه و جایگزینی با داده‌های کامل
+    base_data.pop('findings_summary', None)
+    base_data['findings'] = getattr(h, 'findings', [])
+    return base_data
 
 
 # ==========================================
@@ -300,10 +323,6 @@ def get_subdomains():
 # Live Subdomains — Rich Filtering
 # ==========================================
 
-# ==========================================
-# Live Subdomains — Rich Filtering
-# ==========================================
-
 @app.route('/api/lives', methods=['GET'])
 @require_auth
 def get_lives():
@@ -420,11 +439,16 @@ def get_http():
       - header_key     : بررسی وجود یک header خاص (X-Powered-By)
       - header_value   : مقدار header (با header_key ترکیب می‌شود)
       - tested         : true/false — فیلتر بر اساس وضعیت تست شده یا نشده
+      - scan_status    : فیلتر بر اساس وضعیت اسکن (not_scanned / clean / findings / confirmed_vuln)
+      - scan_statuses  : چند وضعیت اسکن با کاما
+      - has_findings   : true/false — آیا یافته‌ای دارد؟
+      - min_confidence : HIGH/MEDIUM/LOW — حداقل سطح اطمینان یافته‌ها
+      - scanned_after, scanned_before : فیلتر تاریخ آخرین اسکن (فرمت تاریخ مشابه created_after)
       - created_after, created_before
       - updated_after, updated_before
       - only_new       : true — ۲۴ ساعت اخیر
       - only_changed   : true — آپدیت شده در ۲۴ ساعت اخیر
-      - sort           : created_date / last_update / status_code / title
+      - sort           : created_date / last_update / status_code / title / scan_status / last_scan_date
       - page, per_page
     """
     page, per_page = get_pagination_args()
@@ -450,8 +474,7 @@ def get_http():
             Q(title__icontains=search)
         )
 
-    # فیلتر status code
-# === فیلتر Status Code (هوشمند) ===
+    # === فیلتر Status Code (هوشمند) ===
     status_query = request.args.get('status_code', '').strip()
     if status_query:
         if '-' in status_query:
@@ -505,7 +528,6 @@ def get_http():
     # فیلتر: فقط آن‌هایی که توسط یک پروایدر یافت شده‌اند
     only_single_provider = request.args.get('only_single_provider', '').lower()
     if only_single_provider == 'true':
-        # اگر provider مشخص شده باشد، محدود به همان provider که تنها یافته باشد
         if provider:
             docs = Subdomains.objects(providers=provider).only('subdomain', 'providers')
             single_subs = {sd.subdomain for sd in docs if sd.providers and len(sd.providers) == 1}
@@ -513,11 +535,9 @@ def get_http():
             docs = Subdomains.objects().only('subdomain', 'providers')
             single_subs = {sd.subdomain for sd in docs if sd.providers and len(sd.providers) == 1}
 
-        # اگر هیچ subdomain ای پیدا نشد، نتیجه باید خالی باشد
         if single_subs:
             q = q.filter(subdomain__in=single_subs)
         else:
-            # Force empty query by filtering on impossible value
             q = q.filter(subdomain='__NO_MATCH__')
 
     # فیلتر favicon
@@ -537,14 +557,45 @@ def get_http():
         else:
             q = q.filter(**{field + '__exists': True})
 
-    # فیلتر تست شده (tested) - فقط برای این تابع
+    # فیلتر تست شده (tested)
     tested = request.args.get('tested', '').lower()
     if tested == 'true':
         q = q.filter(tested=True)
     elif tested == 'false':
         q = q.filter(tested=False)
 
+    # === فیلترهای جدید اسکن (Scan Artifacts) ===
+    scan_status = request.args.get('scan_status', '').strip()
+    if scan_status:
+        q = q.filter(scan_status=scan_status)
+
+    scan_statuses = request.args.get('scan_statuses', '').strip()
+    if scan_statuses:
+        q = q.filter(scan_status__in=[s.strip() for s in scan_statuses.split(',') if s.strip()])
+
+    has_findings = request.args.get('has_findings', '').lower()
+    if has_findings == 'true':
+        q = q.filter(findings__0__exists=True)
+    elif has_findings == 'false':
+        q = q.filter(Q(findings__0__exists=False) | Q(findings__exists=False) | Q(findings__size=0))
+
+    min_confidence = request.args.get('min_confidence', '').upper()
+    if min_confidence:
+        if min_confidence == 'HIGH':
+            q = q.filter(findings__confidence__in=['HIGH', 'high'])
+        elif min_confidence == 'MEDIUM':
+            q = q.filter(findings__confidence__in=['HIGH', 'high', 'MEDIUM', 'medium'])
+        elif min_confidence == 'LOW':
+            q = q.filter(findings__confidence__in=['HIGH', 'high', 'MEDIUM', 'medium', 'LOW', 'low'])
+
     # تاریخ‌ها
+    scanned_after = parse_date(request.args.get('scanned_after', ''))
+    if scanned_after:
+        q = q.filter(last_scan_date__gte=scanned_after)
+    scanned_before = parse_date(request.args.get('scanned_before', ''))
+    if scanned_before:
+        q = q.filter(last_scan_date__lte=scanned_before)
+
     created_after = parse_date(request.args.get('created_after', ''))
     if created_after:
         q = q.filter(created_date__gte=created_after)
@@ -570,6 +621,8 @@ def get_http():
         'last_update': '+last_update', '-last_update': '-last_update',
         'status_code': '+status_code', '-status_code': '-status_code',
         'title': '+title', '-title': '-title',
+        'scan_status': '+scan_status', '-scan_status': '-scan_status',
+        'last_scan_date': '+last_scan_date', '-last_scan_date': '-last_scan_date',
     }
     order = sort_map.get(request.args.get('sort', '-created_date'), '-created_date')
     q = q.order_by(order)
@@ -587,6 +640,22 @@ def get_http():
         'pages': (total + per_page - 1) // per_page,
         'data': [serialize_http(h, provider_map.get(h.subdomain, [])) for h in http_objs]
     })
+
+
+@app.route('/api/http/<subdomain>', methods=['GET'])
+@require_auth
+def get_http_detail(subdomain):
+    """جزئیات کامل یک سرویس HTTP به همراه لیست کامل یافته‌های اسکن و context"""
+    h = Http.objects(subdomain=subdomain).first()
+    if not h:
+        return jsonify({'error': 'Not found'}), 404
+        
+    provider_doc = Subdomains.objects(subdomain=subdomain).only('providers').first()
+    providers = provider_doc.providers if provider_doc else []
+    
+    return jsonify(serialize_http_detail(h, providers))
+
+
 # ==========================================
 # Target Testing Management
 # ==========================================
@@ -837,6 +906,28 @@ def timeline_stats():
     return jsonify({'days': days, 'program': program or 'all', 'data': timeline})
 
 
+@app.route('/api/meta/scan-stats', methods=['GET'])
+@require_auth
+def get_scan_stats():
+    """
+    آمار وضعیت‌های اسکن و یافته‌ها
+    Params:
+      - program : اختیاری — محدود به یک برنامه
+    """
+    program = request.args.get('program', '').strip()
+    q = Http.objects()
+    if program:
+        q = q.filter(program_name=program)
+
+    return jsonify({
+        'not_scanned': q.filter(scan_status='not_scanned').count(),
+        'clean': q.filter(scan_status='clean').count(),
+        'findings': q.filter(scan_status='findings').count(),
+        'confirmed_vuln': q.filter(scan_status='confirmed_vuln').count(),
+        'total': q.count()
+    })
+
+
 # ==========================================
 # Lookup & Meta — برای populate کردن فیلترها در UI
 # ==========================================
@@ -1013,6 +1104,7 @@ def export_urls():
     urls = [h.url or h.subdomain for h in q if h.url or h.subdomain]
     return app.response_class('\n'.join(urls), mimetype='text/plain')
 
+
 @app.route('/api/export/lives', methods=['GET'])
 @require_auth
 def export_lives():
@@ -1075,6 +1167,69 @@ def export_lives_ips():
     # مرتب‌سازی IPها و تبدیل به رشته
     text = '\n'.join(sorted(list(unique_ips)))
     return app.response_class(text, mimetype='text/plain')
+
+
+@app.route('/api/export/findings', methods=['GET'])
+@require_auth
+def export_findings():
+    """
+    خروجی JSON از تمام یافته‌ها (تخت شده - یک یافته در هر ردیف).
+    Query Params:
+      - program        : نام برنامه
+      - scope          : دامنه اصلی
+      - min_confidence : HIGH/MEDIUM/LOW
+      - page, per_page : صفحه‌بندی روی یافته‌های استخراج‌شده
+    """
+    program = request.args.get('program', '').strip()
+    scope = request.args.get('scope', '').strip()
+    min_confidence = request.args.get('min_confidence', '').upper()
+    page, per_page = get_pagination_args()
+
+    q = Http.objects(findings__0__exists=True)
+    if program:
+        q = q.filter(program_name=program)
+    if scope:
+        q = q.filter(scope=scope)
+
+    conf_levels = []
+    if min_confidence == 'HIGH':
+        conf_levels = ['HIGH']
+    elif min_confidence == 'MEDIUM':
+        conf_levels = ['HIGH', 'MEDIUM']
+    elif min_confidence == 'LOW':
+        conf_levels = ['HIGH', 'MEDIUM', 'LOW']
+
+    if conf_levels:
+        q = q.filter(findings__confidence__in=[c.lower() for c in conf_levels] + conf_levels)
+
+    all_findings = []
+    for h in q:
+        for f in h.findings:
+            conf = str(f.get('confidence', '')).upper()
+            if conf_levels and conf not in conf_levels:
+                continue
+            all_findings.append({
+                'subdomain': h.subdomain,
+                'url': h.url,
+                'program_name': h.program_name,
+                'finding': f
+            })
+
+    # Pagination logic over flattened findings list
+    total = len(all_findings)
+    start = (page - 1) * per_page
+    end = start + per_page
+    paginated_findings = all_findings[start:end]
+
+    return jsonify({
+        'total': total,
+        'page': page,
+        'per_page': per_page,
+        'pages': (total + per_page - 1) // per_page,
+        'data': paginated_findings
+    })
+
+
 # ==========================================
 # Entry Point
 # ==========================================

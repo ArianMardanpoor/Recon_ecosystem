@@ -3,10 +3,12 @@ package main
 
 import (
 	"bufio"
-	"context"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"reconpipeline/utils"
 )
 
+var logWriter io.Writer = os.Stdout // Defaults to Stdout before being overridden
 var repLogger *reporter.Logger
 
 const (
@@ -41,7 +44,73 @@ var (
 
 func logMsg(msg string, color string) {
 	ts := time.Now().Format("15:04:05")
-	fmt.Printf("%s[%s]%s %s[BRIDGE] %s%s\n", M_gray, ts, M_reset, color, msg, M_reset)
+	fmt.Fprintf(logWriter, "%s[%s]%s %s[BRIDGE] %s%s\n", M_gray, ts, M_reset, color, msg, M_reset)
+}
+
+// Minimal loadEnv helper to mimic xssniper's standard local pattern
+func loadEnv() {
+	f, err := os.Open(".env")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			os.Setenv(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+		}
+	}
+}
+
+// sendTelegramDoc sends the log document as multipart/form-data
+func sendTelegramDoc(token, chatID, filePath, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	_ = writer.WriteField("chat_id", chatID)
+	_ = writer.WriteField("caption", caption)
+
+	part, err := writer.CreateFormFile("document", filepath.Base(filePath))
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(part, file); err != nil {
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	urlStr := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", token)
+	req, err := http.NewRequest("POST", urlStr, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 type APIResponse struct {
@@ -138,16 +207,11 @@ func markAsScanned(urlStr string) {
 	logMsg(fmt.Sprintf("Target marked as scanned: %s", urlStr), M_green)
 }
 
-// تغییر عملکرد: افزودن پشتیبانی از Context برای مدیریت زمان اجرای باینری‌ها
-func runBinaryWithContext(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
 func runBinary(name string, args ...string) error {
-	return runBinaryWithContext(context.Background(), name, args...)
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = logWriter // Redirect stdout to multi-writer
+	cmd.Stderr = logWriter // Redirect stderr to multi-writer
+	return cmd.Run()
 }
 
 func getSafeName(u string) string {
@@ -169,7 +233,6 @@ func countLines(path string) int {
 	}
 	return n
 }
-
 func countLinesInDir(dir string) int {
 	total := 0
 	entries, err := os.ReadDir(dir)
@@ -213,27 +276,17 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	katanaOutFile := filepath.Join(katanaDir, safeURL+"-katana.txt")
 
 	if !noCrawl {
-		// STEP 1: Passive discovery
+		// STEP 1: Passive discovery (must finish before anything else starts)
 		logMsg(fmt.Sprintf("[1/3] Running nice_passive for %s", target), M_gray)
 		if err := runBinary("./nice_passive", "-o", passiveDir, hostname); err != nil {
 			logMsg(fmt.Sprintf("nice_passive failed for %s: %v", target, err), M_red)
 		}
 
-		// STEP 2: Katana runs with an explicit safety timeout
+		// STEP 2: Katana runs ONLY on the unique output of passive phase
 		if countLines(passiveOutFile) > 0 {
 			logMsg(fmt.Sprintf("[2/3] Running nice_katana on passive results for %s", target), M_gray)
-
-			// ایجاد یک محدودیت زمانی حداکثر ۳ دقیقه‌ای برای اتمام کار کاتانا روی این ساب‌دومین
-			katanaCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			err := runBinaryWithContext(katanaCtx, "./nice_katana", "-o", katanaDir, passiveOutFile)
-			cancel() // آزادسازی کانتکست بلافاصله پس از پایان کار
-
-			if err != nil {
-				if katanaCtx.Err() == context.DeadlineExceeded {
-					logMsg(fmt.Sprintf("nice_katana TIMED OUT (3m limit reached) for %s. Forcing pipeline forward.", target), M_red)
-				} else {
-					logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
-				}
+			if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
+				logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
 			}
 		} else {
 			logMsg(fmt.Sprintf("No passive URLs found for %s, skipping Katana", target), M_gray)
@@ -313,10 +366,24 @@ func main() {
 	phase := flag.Int("phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
 	flag.Parse()
 
-	var err error
-	repLogger, err = reporter.NewLogger("results/raw_findings.jsonl")
-	if err != nil {
-		logMsg(fmt.Sprintf("reporter init failed: %v", err), M_red)
+	// STEP 1: Capture terminal output to temp file explicitly via logWriter
+	logFilePath := filepath.Join(os.TempDir(), fmt.Sprintf("scan_log_%d.txt", time.Now().Unix()))
+	logFile, err := os.Create(logFilePath)
+	if err == nil {
+		logWriter = io.MultiWriter(os.Stdout, logFile)
+		// Defer destruction and closing guaranteed on exit/panic LIFO style
+		defer os.Remove(logFilePath)
+		defer logFile.Close()
+	}
+
+	var errLogger error
+	repLogger, errLogger = reporter.NewLogger("results/raw_findings.jsonl")
+	if errLogger != nil {
+		logMsg(fmt.Sprintf("reporter init failed: %v", errLogger), M_red)
+		if logFile != nil {
+			logFile.Close()
+			os.Remove(logFilePath)
+		}
 		os.Exit(1)
 	}
 	startTime := time.Now()
@@ -381,10 +448,30 @@ func main() {
 
 	reporter.PrintDashboard(reporter.DashboardStats{
 		TargetsScanned:   len(newTargets),
-		PassiveURLs:      countLinesInDir(filepath.Join(globalOutputDir, "passive")),
+		PassiveURLs:      countLinesInDir(filepath.Join(globalOutputDir, "passive")), // adjust if you track per-target totals instead
 		ParamsDiscovered: len(findings),
 		VulnsFound:       vulnCount,
 		ReportPath:       mdPath,
 		Elapsed:          time.Since(startTime),
 	})
+
+	// STEP 2 & 3: Attempt to upload to telegram before the file gets destroyed
+	loadEnv()
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	chatID := os.Getenv("TELEGRAM_CHAT_ID")
+
+	if botToken != "" && chatID != "" {
+		if logFile != nil {
+			logFile.Sync() // Ensure OS buffer is flushed to disk prior to upload
+		}
+
+		caption := fmt.Sprintf("Mode: %s\nTargets: %d\nElapsed: %s\nVulns Found: %d",
+			strings.ToUpper(*mode), len(newTargets), time.Since(startTime).Round(time.Second).String(), vulnCount)
+
+		if err := sendTelegramDoc(botToken, chatID, logFilePath, caption); err != nil {
+			logMsg(fmt.Sprintf("Failed to send log to Telegram: %v", err), M_red)
+		} else {
+			logMsg("Successfully sent log file to Telegram.", M_green)
+		}
+	}
 }

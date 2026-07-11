@@ -604,6 +604,25 @@ func dedupeConfirmedURLs(urls []string) []string {
 	return unique
 }
 
+// Helper to send the formatted Telegram message using the existing envelope configuration
+func (tg *Telegram) sendMessage(text string) {
+	if tg == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"chat_id":                  tg.ChatID,
+		"text":                     text,
+		"parse_mode":               "HTML",
+		"disable_web_page_preview": true,
+	}
+	body, _ := json.Marshal(payload)
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tg.Token)
+
+	ratelimit.Acquire(apiURL)
+	client := ratelimit.GetHTTPClient(apiURL)
+	client.Post(apiURL, "application/json", bytes.NewReader(body))
+}
+
 func (tg *Telegram) notify(report VulnerabilityReport) {
 	if !report.HasVulns() {
 		return
@@ -613,6 +632,7 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 		atomic.AddInt64(&vulnerableTargets, 1)
 	}
 
+	// 1. Terminal Output and File Write (Always triggers for any finding)
 	reportJSON, _ := json.MarshalIndent(report, "", "  ")
 	formatted := dedupeNucleiFindings(report)
 
@@ -626,40 +646,77 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 	fileName := filepath.Join(vulnDir, safeNameStr+".json")
 	os.WriteFile(fileName, reportJSON, 0644)
 
-	hasHighSeverity := false
+	// 2. Evaluate Findings for Telegram Push
+	if tg == nil {
+		return
+	}
+
+	hasConfirmed := false
+	hasValidCandidate := false
+	totalVulns := 0
+	noisyDOMVulns := 0
+
 	checkList := [][]Vulnerability{report.QueryParameters, report.Headers, report.JSONBody, report.DOM}
 	for _, list := range checkList {
 		for _, v := range list {
-			if v.Severity == "confirmed" || v.Severity == "likely" {
-				hasHighSeverity = true
-				break
+			totalVulns++
+			if v.Severity == "confirmed" || v.Confirmed {
+				hasConfirmed = true
+			} else if v.Severity == "likely" {
+				hasValidCandidate = true
+			} else if v.Severity == "possible" {
+				if strings.Contains(v.Name, "(Note: No HTTP reflection, possible false positive)") {
+					noisyDOMVulns++
+				} else {
+					hasValidCandidate = true
+				}
 			}
-		}
-		if hasHighSeverity {
-			break
 		}
 	}
 
-	if tg != nil && hasHighSeverity {
-		ts := time.Now().Format("2006-01-02 15:04:05")
+	// If all findings are known-noisy DOM false positives, suppress Telegram notification completely.
+	if totalVulns > 0 && totalVulns == noisyDOMVulns {
+		return
+	}
+
+	ts := time.Now().Format("2006-01-02 15:04:05")
+
+	// 3. Dispatch appropriate message types
+	if hasConfirmed {
+		// PATH A: High-Urgency Confirmed Finding
 		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("🚨 <b>XSS Finding!</b>\n\n"))
+		sb.WriteString("🚨 <b>CONFIRMED XSS</b>\n\n")
 		sb.WriteString(fmt.Sprintf("🎯 <b>Target:</b> <code>%s</code>\n", escapeHTML(report.URL)))
 		sb.WriteString(fmt.Sprintf("📅 <b>Time:</b> %s\n\n", ts))
 		sb.WriteString(fmt.Sprintf("<pre>%s</pre>", escapeHTML(string(reportJSON))))
 
-		payload := map[string]interface{}{
-			"chat_id":                  tg.ChatID,
-			"text":                     sb.String(),
-			"parse_mode":               "HTML",
-			"disable_web_page_preview": true,
+		tg.sendMessage(sb.String())
+
+	} else if hasValidCandidate {
+		// PATH B: Lower-key Candidate Finding (Likely/Possible)
+		// Ensure we only spam this candidate summary once per target URL per run.
+		if _, loaded := candidateNotified.LoadOrStore(report.URL, true); !loaded {
+			var sb strings.Builder
+			sb.WriteString("🔎 <b>Candidate findings</b>\n\n")
+			sb.WriteString(fmt.Sprintf("🎯 <b>Target:</b> <code>%s</code>\n", escapeHTML(report.URL)))
+			sb.WriteString(fmt.Sprintf("📅 <b>Time:</b> %s\n\n", ts))
+			
+			sb.WriteString("<b>Summary of Findings:</b>\n")
+			if len(report.QueryParameters) > 0 {
+				sb.WriteString(fmt.Sprintf("- Query Parameters: %d\n", len(report.QueryParameters)))
+			}
+			if len(report.Headers) > 0 {
+				sb.WriteString(fmt.Sprintf("- Headers: %d\n", len(report.Headers)))
+			}
+			if len(report.JSONBody) > 0 {
+				sb.WriteString(fmt.Sprintf("- JSON Body: %d\n", len(report.JSONBody)))
+			}
+			if len(report.DOM) > 0 {
+				sb.WriteString(fmt.Sprintf("- DOM: %d\n", len(report.DOM)))
+			}
+
+			tg.sendMessage(sb.String())
 		}
-		body, _ := json.Marshal(payload)
-		apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tg.Token)
-		
-		ratelimit.Acquire(apiURL)
-		client := ratelimit.GetHTTPClient(apiURL)
-		client.Post(apiURL, "application/json", bytes.NewReader(body))
 	}
 }
 
@@ -704,6 +761,9 @@ var (
 	vulnerableTargets    int64
 	vulnerableMap        sync.Map
 	workerLock           sync.Map
+	vulnerableMap     sync.Map
+	workerLock        sync.Map
+	candidateNotified sync.Map
 	nucleiExists         bool
 	domSinkCheckerExists bool
 	skipSPA              bool
