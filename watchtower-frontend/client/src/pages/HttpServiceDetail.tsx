@@ -4,10 +4,11 @@ import { useParams, Link } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { 
   ArrowLeft, Copy, Check, ShieldAlert, ShieldCheck, 
-  Terminal, Globe, ExternalLink, Shield, Server, FileCode, KeyRound, AlertCircle 
+  Terminal, Globe, ExternalLink, Shield, Server, FileCode, 
+  KeyRound, AlertCircle, Activity 
 } from 'lucide-react';
 import { Layout } from '@/components/Layout';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -16,12 +17,12 @@ import { getHttpServiceDetail } from '@/api/http';
 import { showToast } from '@/lib/toast';
 
 const TRANSLATE_REFLECTION: Record<string, string> = {
-  'source_reflection': 'انعکاس در Source',
-  'dom_sink_injection': 'تزریق در DOM Sink',
-  'header_injection': 'تزریق در هدر',
-  'json_body_injection': 'تزریق در بدنه JSON',
-  'parameter_discovered': 'کشف پارامتر مخفی',
-  'candidate_generated': 'کاندید تولید شده'
+  'source_reflection': 'Source Reflection',
+  'dom_sink_injection': 'DOM Sink Injection',
+  'header_injection': 'Header Injection',
+  'json_body_injection': 'JSON Body Injection',
+  'parameter_discovered': 'Hidden Parameter Discovered',
+  'candidate_generated': 'Generated Candidate'
 };
 
 const getConfidenceStyles = (confidence: string) => {
@@ -123,7 +124,7 @@ export default function HttpServiceDetail() {
     <Layout>
       <div className="space-y-6 animate-in fade-in zoom-in-95 duration-500">
         
-        {/* هدر بالای صفحه */}
+        {/* Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-black/40 border border-white/5 p-6 rounded-xl backdrop-blur-sm">
           <div className="flex items-center gap-4">
             <Link href="/http-services">
@@ -168,7 +169,7 @@ export default function HttpServiceDetail() {
           </div>
         </div>
 
-        {/* اطلاعات کلی (Grid) */}
+        {/* Overview Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
           <Card className="bg-black/20 border-white/5">
             <CardHeader className="pb-2">
@@ -216,7 +217,7 @@ export default function HttpServiceDetail() {
             <Terminal className="w-16 h-16 text-muted-foreground/30 mb-4" />
             <h3 className="text-xl font-bold text-white mb-2">Target Not Scanned</h3>
             <p className="text-muted-foreground text-center max-w-md">
-              این هدف هنوز توسط موتورهای شناسایی و اسکنر آسیب‌پذیری بررسی نشده است. برای مشاهده جزئیات بیشتر، اسکن را اجرا کنید.
+              This target has not been scanned by the discovery engines and vulnerability scanners yet. Run a scan to view more details.
             </p>
           </div>
         ) : (
@@ -241,7 +242,7 @@ export default function HttpServiceDetail() {
               </TabsTrigger>
             </TabsList>
 
-            {/* بخش Findings */}
+            {/* Findings Tab */}
             <TabsContent value="findings" className="space-y-4">
               <div className="flex justify-end mb-4">
                 <select 
@@ -259,7 +260,7 @@ export default function HttpServiceDetail() {
               {filteredFindings.length === 0 ? (
                 <div className="text-center py-10 bg-black/20 rounded-xl border border-white/5">
                   <ShieldCheck className="w-12 h-12 text-green-500/50 mx-auto mb-3" />
-                  <p className="text-muted-foreground">هیچ موردی با این فیلتر یافت نشد یا هدف امن است.</p>
+                  <p className="text-muted-foreground">No findings match this filter, or the target is secure.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 gap-4">
@@ -302,7 +303,7 @@ export default function HttpServiceDetail() {
               )}
             </TabsContent>
 
-            {/* بخش Passive URLs */}
+            {/* Passive URLs Tab */}
             <TabsContent value="passive">
               <Card className="bg-black/20 border-white/5">
                 <CardHeader className="flex flex-row items-center justify-between pb-4">
@@ -321,13 +322,13 @@ export default function HttpServiceDetail() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-muted-foreground text-sm text-center py-6">هیچ آدرس پسیوی یافت نشد.</p>
+                    <p className="text-muted-foreground text-sm text-center py-6">No passive URLs found.</p>
                   )}
                 </CardContent>
               </Card>
             </TabsContent>
 
-            {/* بخش Crawled URLs */}
+            {/* Crawled URLs Tab */}
             <TabsContent value="crawled">
               <Card className="bg-black/20 border-white/5">
                 <CardHeader className="flex flex-row items-center justify-between pb-4">
@@ -346,18 +347,18 @@ export default function HttpServiceDetail() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-muted-foreground text-sm text-center py-6">هیچ آدرسی کرال نشده است.</p>
+                    <p className="text-muted-foreground text-sm text-center py-6">No crawled URLs found.</p>
                   )}
                 </CardContent>
               </Card>
             </TabsContent>
 
-            {/* بخش Parameters */}
+            {/* Parameters Tab */}
             <TabsContent value="params">
               <Card className="bg-black/20 border-white/5">
                 <CardHeader>
                   <CardTitle className="text-lg">Discovered Parameters</CardTitle>
-                  <CardDescription>پارامترهای کشف شده توسط ابزارهایی نظیر x8 و فازینگ.</CardDescription>
+                  <CardDescription>Parameters discovered by tools like x8 and fuzzing.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {discovered_params?.length ? (
@@ -378,7 +379,7 @@ export default function HttpServiceDetail() {
                       </TooltipProvider>
                     </div>
                   ) : (
-                    <p className="text-muted-foreground text-sm text-center py-6">پارامتری یافت نشد.</p>
+                    <p className="text-muted-foreground text-sm text-center py-6">No parameters found.</p>
                   )}
                 </CardContent>
               </Card>

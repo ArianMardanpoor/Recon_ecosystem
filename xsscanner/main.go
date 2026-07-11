@@ -266,7 +266,7 @@ func runIngest(hostname string) {
 		}
 	}
 
-	pythonPath := filepath.Join(repoRoot, "watchtower", "venv", "bin", "python3")
+	pythonPath := "/workspaces/Recon_ecosystem/watchtower/venv/bin/python3"
 	if _, err := os.Stat(pythonPath); err != nil {
 		fmt.Fprintf(os.Stderr, "%s[WARNING] watchtower venv python3 not found at %s. Falling back to global python3.%s\n", M_red, pythonPath, M_reset)
 		pythonPath = "python3"
