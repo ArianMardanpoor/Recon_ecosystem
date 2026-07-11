@@ -28,10 +28,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"reconpipeline/pkg/ratelimit"
 	"reconpipeline/pkg/reporter"
+	"reconpipeline/pkg/spadetect"
 )
 
 var repLogger *reporter.Logger
@@ -925,68 +925,6 @@ func extractURLsFromNuclei(nucleiOutput string) []string {
 	return urls
 }
 
-// ── SPA Detection ────────────────────────────────────────────────────────────
-
-func isSPA(targetURL string) bool {
-	ratelimit.Acquire(targetURL)
-	client := ratelimit.GetHTTPClient(targetURL)
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
-		return false
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; xssniper)")
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false
-	}
-	body := string(bodyBytes)
-
-	markers := []string{
-		`<div id="root"`,
-		`<div id="app"`,
-		`__NEXT_DATA__`,
-		`window.__INITIAL_STATE__`,
-		`ReactDOM.render`,
-		`ng-version=`,
-		`data-reactroot`,
-	}
-	for _, m := range markers {
-		if strings.Contains(body, m) {
-			return true
-		}
-	}
-
-	reScript := regexp.MustCompile(`(?s)<script[^>]*>.*?</script>`)
-	reStyle := regexp.MustCompile(`(?s)<style[^>]*>.*?</style>`)
-	clean := reScript.ReplaceAllString(body, "")
-	clean = reStyle.ReplaceAllString(clean, "")
-	reTag := regexp.MustCompile(`<[^>]*>`)
-	text := reTag.ReplaceAllString(clean, " ")
-	visibleCount := 0
-	for _, ch := range text {
-		if !unicode.IsSpace(ch) {
-			visibleCount++
-		}
-	}
-	if visibleCount < 500 {
-		return true
-	}
-
-	xPoweredBy := resp.Header.Get("x-powered-by")
-	if strings.Contains(strings.ToLower(xPoweredBy), "next.js") && visibleCount < 500 {
-		return true
-	}
-	if strings.Contains(strings.ToLower(xPoweredBy), "express") && visibleCount < 500 {
-		return true
-	}
-
-	return false
-}
 
 // ── Generic Reflector Detection ─────────────────────────────────────────────
 
@@ -1188,10 +1126,10 @@ func processURL(targetURL string, index, total int) {
 
 	logLine("TARGET", X_white, "[%d/%d | Vulns: %d] %s", currProcessed, total, currVulns, targetURL)
 
-	if !skipSPA && isSPA(targetURL) {
-		logLine("SKIP", X_yellow, "SPA/React detected, skipping heavy scan for %s", targetURL)
-		return
-	}
+	if !skipSPA && spadetect.IsSPA(targetURL) {
+			logLine("SKIP", X_yellow, "SPA/React detected, skipping heavy scan for %s", targetURL)
+			return
+		}
 
 	if isGenericReflector(targetURL) {
 		logLine("SKIP", X_yellow, "Generic reflector detected, skipping %s", targetURL)

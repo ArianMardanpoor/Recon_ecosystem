@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
+	"strings"
 	"time"
 )
 
@@ -17,59 +17,85 @@ const (
 	reset = "\033[0m"
 )
 
-func runNiceKatana(targetURL, outDir string) {
-	fmt.Printf("%srunning katana for: %s%s\n", gray, targetURL, reset)
+func runNiceKatanaBatch(targets []string, outDir string) {
+	if len(targets) == 0 {
+		return
+	}
+
+	// ۱. ساخت فایل موقت حاوی تمام تارگت‌ها برای پاس دادن به کاتانا
+	tmpFile, err := os.CreateTemp("", "katana_targets_*.txt")
+	if err != nil {
+		fmt.Printf("Error creating temp file: %v\n", err)
+		return
+	}
+	defer os.Remove(tmpFile.Name())
+
+	for _, t := range targets {
+		tmpFile.WriteString(t + "\n")
+	}
+	tmpFile.Close()
 
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		fmt.Printf("Error creating directory: %v\n", err)
 		return
 	}
 
-	safe := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(targetURL, "_")
-	katanaOutput := filepath.Join(outDir, safe+"-katana.txt")
-
+	// چون لیست گروهی است، اسم فایل خروجی را عمومی‌تر می‌گذاریم
+	katanaOutput := filepath.Join(outDir, "katana_batch_output.txt")
 	extFilter := "json,js,fnt,ogg,css,jpg,jpeg,png,svg,img,gif,exe,mp4,flv,pdf,doc,ogv,webm,wmv,webp,mov,mp3,m4a,m4p,ppt,pptx,scss,tif,tiff,ttf,otf,woff,woff2,bmp,ico,eot,htc,swf,rtf,image,rf,txt,ml,ip"
 
-	fmt.Printf("%sExecuting Katana (rate-limited) for %s%s\n", gray, targetURL, reset)
+	// متغیرهای رنگ
+	gray := "\033[1;30m"
+	reset := "\033[0m"
 
+	fmt.Printf("%sExecuting Katana (Batch mode, rate-limited) for %d targets%s\n", gray, len(targets), reset)
+
+	// ۲. استفاده از تمام فلگ‌های اختصاصی خودت
 	ctxArgs := []string{
-		"-u", targetURL,
+		"-list", tmpFile.Name(), // به جای -u فایل لیست را دادیم
 		"-d", "2",
 		"-js-crawl",
 		"-jsluice",
 		"-known-files", "all",
 		"-automatic-form-fill",
 		"-extension-filter", extFilter,
-		"-c", "4", // محدود کردن کانکشن‌های همزمان برای جلوگیری از رفتار تهاجمی
-		"-rl", "12", // کاهش نرخ درخواست به ۱۲ ریکوئست در ثانیه برای کیپ‌کالم نگه داشتن کلاودفلر
-		"-delay", "250", // اضافه کردن تاخیر بین درخواست‌ها (بسته به میزان حساسیت تارگت)
-		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", // ماسک کردن هویت ابزار
-		"-retry", "3", // تلاش مجدد برای خطاهای گذرا
-		"-timeout", "4", // تایم‌اوت هر ریکوئست
+		"-c", "4",
+		"-rl", "12",
+		"-delay", "250",
+		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"-retry", "3",
+		"-timeout", "4",
 		"-silent",
 		"-o", katanaOutput,
 	}
 
 	cmd := exec.Command("katana", ctxArgs...)
 
-	// Hard ceiling so a stuck crawl can't stall the whole pipeline
+	// ۳. داینامیک کردن تایم‌اوت: ۱۵ دقیقه برای هر تارگت داخل لیست
+	timeoutDuration := time.Duration(15*len(targets)) * time.Minute
+	// قرار دادن سقف مکانیزم جلوگیری از قفل شدن (مثلا حداکثر ۳ ساعت برای کل لیست)
+	if timeoutDuration > 3*time.Hour {
+		timeoutDuration = 3 * time.Hour
+	}
+
 	done := make(chan error, 1)
 	go func() { done <- cmd.Run() }()
 
 	select {
 	case err := <-done:
 		if err != nil {
-			fmt.Printf("Error running katana: %v\n", err)
+			fmt.Printf("Error running katana batch: %v\n", err)
 			return
 		}
-	case <-time.After(15 * time.Minute):
-		fmt.Printf("%skatana timed out for %s, killing process%s\n", gray, targetURL, reset)
+	case <-time.After(timeoutDuration):
+		fmt.Printf("%skatana timed out for batch after %v, killing process%s\n", gray, timeoutDuration, reset)
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
 		return
 	}
 
+	// ۴. شمارش خطوط خروجی نهایی
 	file, _ := os.Open(katanaOutput)
 	count := 0
 	if file != nil {
@@ -80,12 +106,14 @@ func runNiceKatana(targetURL, outDir string) {
 		file.Close()
 	}
 
-	fmt.Printf("%sdone for %s, results: %d saved to %s%s\n", gray, targetURL, count, katanaOutput, reset)
+	fmt.Printf("%sdone for batch, results: %d saved to %s%s\n", gray, count, katanaOutput, reset)
 }
 
 func main() {
 	var outDir string
 	flag.StringVar(&outDir, "o", "results/katana", "Output directory")
+
+	// نکته: اگر فلگ‌های دیگری مثل timeout یا jsluice در نسخه اصلی داری، اینجا تعریفشان کن
 	flag.Parse()
 
 	var targets []string
@@ -95,7 +123,11 @@ func main() {
 			file, _ := os.Open(arg)
 			scanner := bufio.NewScanner(file)
 			for scanner.Scan() {
-				targets = append(targets, scanner.Text())
+				// جلوگیری از اضافه شدن خطوط خالی
+				val := strings.TrimSpace(scanner.Text())
+				if val != "" {
+					targets = append(targets, val)
+				}
 			}
 			file.Close()
 		} else {
@@ -106,7 +138,10 @@ func main() {
 		if (stat.Mode() & os.ModeCharDevice) == 0 {
 			scanner := bufio.NewScanner(os.Stdin)
 			for scanner.Scan() {
-				targets = append(targets, scanner.Text())
+				val := strings.TrimSpace(scanner.Text())
+				if val != "" {
+					targets = append(targets, val)
+				}
 			}
 		}
 	}
@@ -119,9 +154,14 @@ func main() {
 		return
 	}
 
-	for _, target := range targets {
-		if target != "" {
-			runNiceKatana(target, outDir)
-		}
-	}
+	// متغیرهای رنگ برای لاگ
+	gray := "\033[1;30m"
+	reset := "\033[0m"
+
+	// لاگ تایید گرفتن کل لیست
+	fmt.Printf("%s[STARTUP] nice_katana processing batch size: %d URLs%s\n", gray, len(targets), reset)
+
+	// حذف حلقه for و ارسال کل آرایه به تابع پردازش گروهی
+	// اگر فلگ‌های دیگری مثل کانکارنسی یا تایم‌اوت داری، به پارامترهای این تابع اضافه‌شان کن
+	runNiceKatanaBatch(targets, outDir)
 }

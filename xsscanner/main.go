@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"reconpipeline/pkg/reporter"
+	"reconpipeline/pkg/spadetect"
 	"reconpipeline/utils"
 )
 
@@ -284,79 +285,82 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 
 		// STEP 2: Katana runs ONLY on the unique output of passive phase
 		if countLines(passiveOutFile) > 0 {
-			logMsg(fmt.Sprintf("[2/3] Running nice_katana on passive results for %s", target), M_gray)
-			if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
-				logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+			if spadetect.IsSPA(target) {
+				logMsg(fmt.Sprintf("[SKIP-SPA] %s: SPA detected, skipping katana crawl", target), M_cyan)
+			} else {
+				logMsg(fmt.Sprintf("[2/3] Running nice_katana on passive results for %s", target), M_gray)
+				if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
+					logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+				}
 			}
 		} else {
 			logMsg(fmt.Sprintf("No passive URLs found for %s, skipping Katana", target), M_gray)
 		}
-	}
 
-	// STEP 3: Params runs only after Katana is fully done
-	logMsg(fmt.Sprintf("[3/3] Running nice_params for %s", target), M_gray)
-	if err := runBinary("./nice_params", "-u", target, "-d", paramsDir); err != nil {
-		logMsg(fmt.Sprintf("nice_params failed for %s: %v", target, err), M_red)
-	}
+		// STEP 3: Params runs only after Katana is fully done
+		logMsg(fmt.Sprintf("[3/3] Running nice_params for %s", target), M_gray)
+		if err := runBinary("./nice_params", "-u", target, "-d", paramsDir); err != nil {
+			logMsg(fmt.Sprintf("nice_params failed for %s: %v", target, err), M_red)
+		}
 
-	// Aggregate results and run xssniper
-	logMsg(fmt.Sprintf("Launching XSSniper for %s", target), M_cyan)
+		// Aggregate results and run xssniper
+		logMsg(fmt.Sprintf("Launching XSSniper for %s", target), M_cyan)
 
-	jobFile := filepath.Join(globalOutputDir, fmt.Sprintf("job_%s.txt", safeURL+"_"+time.Now().Format("20060102150405")))
-	paramFilePath := filepath.Join(paramsDir, hostname+"-param.txt")
+		jobFile := filepath.Join(globalOutputDir, fmt.Sprintf("job_%s.txt", safeURL+"_"+time.Now().Format("20060102150405")))
+		paramFilePath := filepath.Join(paramsDir, hostname+"-param.txt")
 
-	f, err := os.Create(jobFile)
-	if err == nil {
-		defer f.Close()
-		f.WriteString(target + "\n")
+		f, err := os.Create(jobFile)
+		if err == nil {
+			defer f.Close()
+			f.WriteString(target + "\n")
 
-		appendSafe := func(path string) {
-			pFile, err := os.Open(path)
-			if err != nil {
-				return
-			}
-			defer pFile.Close()
-			scanner := bufio.NewScanner(pFile)
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" {
-					continue
+			appendSafe := func(path string) {
+				pFile, err := os.Open(path)
+				if err != nil {
+					return
 				}
-				if lURL, err := url.Parse(line); err == nil {
-					lHost := lURL.Hostname()
-					if lHost != rootDomain && !strings.HasSuffix(lHost, "."+rootDomain) {
+				defer pFile.Close()
+				scanner := bufio.NewScanner(pFile)
+				for scanner.Scan() {
+					line := strings.TrimSpace(scanner.Text())
+					if line == "" {
 						continue
 					}
-				} else {
-					continue
+					if lURL, err := url.Parse(line); err == nil {
+						lHost := lURL.Hostname()
+						if lHost != rootDomain && !strings.HasSuffix(lHost, "."+rootDomain) {
+							continue
+						}
+					} else {
+						continue
+					}
+					if !utils.IsGoodURL(line) {
+						continue
+					}
+					f.WriteString(line + "\n")
 				}
-				if !utils.IsGoodURL(line) {
-					continue
-				}
-				f.WriteString(line + "\n")
+			}
+
+			if !noCrawl {
+				appendSafe(passiveOutFile)
+				appendSafe(katanaOutFile)
 			}
 		}
 
-		if !noCrawl {
-			appendSafe(passiveOutFile)
-			appendSafe(katanaOutFile)
+		args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3"}
+		if isSingleTarget {
+			args = append(args, "-u", target)
 		}
-	}
+		if skipSPA {
+			args = append(args, "-skip-spa")
+		}
+		args = append(args, "-phase", fmt.Sprintf("%d", phase))
 
-	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3"}
-	if isSingleTarget {
-		args = append(args, "-u", target)
-	}
-	if skipSPA {
-		args = append(args, "-skip-spa")
-	}
-	args = append(args, "-phase", fmt.Sprintf("%d", phase))
+		runBinary("./xssniper", args...)
 
-	runBinary("./xssniper", args...)
-
-	markAsScanned(target)
+		markAsScanned(target)
+	}
 }
-
 func main() {
 	mode := flag.String("mode", "normal", "Scan mode: normal or fresh")
 	inputFile := flag.String("i", "", "Input file with targets (skips API)")
