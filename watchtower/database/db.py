@@ -1,5 +1,5 @@
 from mongoengine import Document, StringField, DateTimeField, ListField, DictField, IntField, BooleanField, connect
-from pymongo import UpdateOne  # اضافه شده برای عملیات گروهی و پرسرعت
+from pymongo import UpdateOne 
 from datetime import datetime
 import tldextract
 import os
@@ -16,7 +16,7 @@ def current_time():
 # اتصال به MongoDB
 connect(
     db="watchtower",
-    host="mongodb://localhost:27017/watchtower",
+    host=os.getenv("MONGO_URI"),
     alias="default"
 )
 
