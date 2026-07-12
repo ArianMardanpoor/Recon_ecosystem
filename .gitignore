@@ -12,7 +12,7 @@ Thumbs.db
 *.pyc
 *.pyo
 *.pyd
-watchtower/.env
+
 
 # فایل‌های سنگینِ دیتابیس داکر لوکال (نباید روی گیت بروند)
 watchtower/database/db_data/
@@ -23,7 +23,6 @@ watchtower/database/db_data/
 **/node_modules/
 watchtower-frontend/dist/
 watchtower-frontend/build/
-watchtower-frontend/.env*
 .pnpm-debug.log*
 
 # ==========================================
@@ -50,7 +49,6 @@ xsscanner/x9
 xsscanner/dom_sink_checker
 xsscanner/xssniper
 xsscanner/xsscanner
-xsscanner/.env
 # Database temporary files
 watchtower/database/db_data/
 
@@ -62,3 +60,9 @@ xsscanner/results/
 
 #programs
 *.json
+
+
+
+.env
+.env.*
+!.env.example

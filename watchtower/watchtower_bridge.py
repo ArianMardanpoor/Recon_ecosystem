@@ -6,10 +6,13 @@ import sys
 import re
 import time
 
-# --- تنظیمات سیستم شما ---
-# آدرس پایه API (بدون /api/http چون در تابع اضافه می‌شود)
+
 BASE_API_URL = "http://YOUR_WATCHTOWER_API/" 
-API_TOKEN = "a21uc0lzeTcK"                      # توکن پیش‌فرض در app.py
+API_TOKEN = os.environ.get("WATCHTOWER_API_TOKEN")
+
+if not API_TOKEN:
+    print("\033[31m[BRIDGE] CRITICAL ERROR: WATCHTOWER_API_TOKEN environment variable is not set!\033[0m")
+    sys.exit(1)                 # توکن پیش‌فرض در app.py
 OLD_TARGETS_FILE = "all_scanned_targets.txt"    # فایل تاریخچه برای anew
 OUTPUT_DIR = "./watchtower_scans"               # محل ذخیره لاگ‌های اسکن
 XSSNIPER_CMD = "go run xssniper_v2.go -w 5"        # دستور اجرای اسکنر
@@ -24,7 +27,7 @@ def get_data_from_api():
     log(f"Connecting to API: {endpoint}...")
     
     headers = {
-        'X-API-Token': "a21uc0lzeTcK"
+        'X-API-Token': API_TOKEN  # استفاده از متغیر سراسری به جای مقدار هاردکد
     }
     
     all_urls = []

@@ -38,10 +38,18 @@ const (
 
 var (
 	apiURL          = "http://localhost:3131/api/http"
-	apiToken        = "a21uc0lzeTcK"
+	apiToken        = string
 	oldTargetsFile  = "all_scanned_targets.txt"
 	globalOutputDir = "./results"
 )
+
+func init() {
+	apiToken = os.Getenv("WATCHTOWER_API_TOKEN")
+	if apiToken == "" {
+		fmt.Println("\033[31m[CRITICAL] WATCHTOWER_API_TOKEN environment variable is not set!\033[0m")
+		os.Exit(1)
+	}
+}
 
 func logMsg(msg string, color string) {
 	ts := time.Now().Format("15:04:05")

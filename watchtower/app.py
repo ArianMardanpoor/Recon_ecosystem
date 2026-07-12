@@ -16,10 +16,14 @@ from database.db import (
     current_time
 )
 
+API_TOKEN = os.getenv("WATCHTOWER_API_TOKEN")
+
+# Fail fast at startup if token is missing
+if not API_TOKEN:
+    print("[!] CRITICAL ERROR: WATCHTOWER_API_TOKEN environment variable is not set.", file=sys.stderr)
+    sys.exit(1)
+
 app = Flask(__name__)
-
-API_TOKEN = os.getenv("WATCHTOWER_API_TOKEN", "a21uc0lzeTcK")
-
 
 # ==========================================
 # Auth & Helpers
