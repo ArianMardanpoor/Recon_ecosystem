@@ -12,6 +12,13 @@ interface HttpFiltersProps {
 }
 
 export function HttpFilters({ filters, setFilter, resetFilters }: HttpFiltersProps) {
+  // Helper to determine the current value for the Scan Status dropdown
+  const getScanStatusValue = () => {
+    if (filters.scan_statuses === 'clean,findings,confirmed_vuln') return 'scanned';
+    if (filters.scan_status) return filters.scan_status;
+    return 'all';
+  };
+
   return (
     <div className="bg-card border rounded-lg p-4 space-y-4 shadow-sm">
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 items-end">
@@ -40,7 +47,7 @@ export function HttpFilters({ filters, setFilter, resetFilters }: HttpFiltersPro
           />
         </div>
 
-        {/* Status Code - دیگه قفل نمیکنه! */}
+        {/* Status Code */}
         <div className="space-y-1.5">
           <Label className="text-sm font-medium">Status Code</Label>
           <Input
@@ -50,7 +57,7 @@ export function HttpFilters({ filters, setFilter, resetFilters }: HttpFiltersPro
           />
         </div>
 
-        {/* Technology - دیگه قفل نمیکنه! */}
+        {/* Technology */}
         <div className="space-y-1.5">
           <Label className="text-sm font-medium">Technology</Label>
           <Input
@@ -88,6 +95,38 @@ export function HttpFilters({ filters, setFilter, resetFilters }: HttpFiltersPro
           </Select>
         </div>
 
+        {/* Scan Status (NEW) */}
+        <div className="space-y-1.5">
+          <Label className="text-sm font-medium">Scan Status</Label>
+          <Select
+            value={getScanStatusValue()}
+            onValueChange={(val) => {
+              if (val === 'all') {
+                setFilter('scan_statuses', undefined);
+                setFilter('scan_status', undefined);
+              } else if (val === 'scanned') {
+                setFilter('scan_status', undefined);
+                setFilter('scan_statuses', 'clean,findings,confirmed_vuln');
+              } else {
+                setFilter('scan_statuses', undefined);
+                setFilter('scan_status', val);
+              }
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Any Scan Status" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Any Scan Status</SelectItem>
+              <SelectItem value="scanned">Scanned Only (Any Result)</SelectItem>
+              <SelectItem value="not_scanned">Not Scanned Yet</SelectItem>
+              <SelectItem value="clean">Clean (No Findings)</SelectItem>
+              <SelectItem value="findings">Has Findings</SelectItem>
+              <SelectItem value="confirmed_vuln">Confirmed Vulnerability</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
         {/* Sort By */}
         <div className="space-y-1.5">
           <Label className="text-sm font-medium">Sort By</Label>
@@ -102,6 +141,7 @@ export function HttpFilters({ filters, setFilter, resetFilters }: HttpFiltersPro
               <SelectItem value="-created_date">Newest First</SelectItem>
               <SelectItem value="created_date">Oldest First</SelectItem>
               <SelectItem value="-last_update">Recently Updated</SelectItem>
+              <SelectItem value="-last_scan_date">Recently Scanned</SelectItem>
               <SelectItem value="status_code">Status Code (Asc)</SelectItem>
               <SelectItem value="-status_code">Status Code (Desc)</SelectItem>
             </SelectContent>

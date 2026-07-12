@@ -49,7 +49,7 @@ def get_pagination_args():
 
 
 def parse_date(date_str):
-    """تبدیل رشته تاریخ به datetime - فرمت: YYYY-MM-DD یا YYYY-MM-DDTHH:MM:SS"""
+    """Convert date string to datetime - Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS"""
     if not date_str:
         return None
     for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d'):
@@ -92,7 +92,7 @@ def serialize_subdomain(sd):
         'program_name': sd.program_name,
         'scope': sd.scope,
         'providers': sd.providers,
-        'tested': getattr(sd, 'tested', False),  # اضافه شد
+        'tested': getattr(sd, 'tested', False),
         'created_date': sd.created_date.strftime('%Y-%m-%d %H:%M:%S') if sd.created_date else None,
         'last_update': sd.last_update.strftime('%Y-%m-%d %H:%M:%S') if sd.last_update else None
     }
@@ -105,7 +105,7 @@ def serialize_live(l):
         'scope': l.scope,
         'ips': l.ips,
         'cdn': l.cdn,
-        'tested': getattr(l, 'tested', False),  # اضافه شد
+        'tested': getattr(l, 'tested', False),
         'created_date': l.created_date.strftime('%Y-%m-%d %H:%M:%S') if l.created_date else None,
         'last_update': l.last_update.strftime('%Y-%m-%d %H:%M:%S') if l.last_update else None
     }
@@ -127,7 +127,7 @@ def serialize_http(h, providers=None):
         'favicon': h.favicon,
         'tested': getattr(h, 'tested', False),
         'providers': providers or [],
-        # اضافه شدن فیلدهای جدید اسکن
+        # New scan artifact fields
         'passive_urls': getattr(h, 'passive_urls', []),
         'crawled_urls': getattr(h, 'crawled_urls', []),
         'discovered_params': getattr(h, 'discovered_params', []),
@@ -148,9 +148,13 @@ def serialize_http(h, providers=None):
 
 def serialize_http_detail(h, providers=None):
     base_data = serialize_http(h, providers)
-    # حذف خلاصه و جایگزینی با داده‌های کامل
+    # Remove summary and replace with full findings payload
     base_data.pop('findings_summary', None)
-    base_data['findings'] = getattr(h, 'findings', [])
+    
+    # Safe list conversion for BaseList to avoid jsonify crash
+    raw_findings = getattr(h, 'findings', [])
+    base_data['findings'] = [dict(f) for f in raw_findings]
+    
     return base_data
 
 
@@ -174,9 +178,9 @@ def health():
 @require_auth
 def get_programs():
     """
-    لیست برنامه‌ها با فیلتر
+    List programs with filters.
     Params:
-      - search: جستجو در نام برنامه
+      - search: Search in program name
     """
     programs = Programs.objects()
     search = request.args.get('search', '').strip()
@@ -192,7 +196,7 @@ def get_programs():
 @app.route('/api/programs/<program_name>', methods=['GET'])
 @require_auth
 def get_program(program_name):
-    """جزئیات یک برنامه به همراه آمار کلی"""
+    """Specific program details with statistics"""
     program = Programs.objects(program_name=program_name).first()
     if not program:
         return jsonify({'error': 'Program not found'}), 404
@@ -215,29 +219,29 @@ def get_program(program_name):
 @require_auth
 def get_subdomains():
     """
-    دریافت ساب‌دامین‌ها با فیلترهای پیشرفته.
+    Get subdomains with advanced filtering.
 
     Query Params:
-      - program       : نام برنامه (مستقیم)
-      - programs      : چند برنامه جدا با کاما  (program1,program2)
-      - scope         : دامنه اصلی (مثلاً example.com)
-      - provider      : نام پروایدر (subfinder, amass, ...)
-      - providers     : چند پروایدر جدا با کاما
-      - search        : جستجو در نام ساب‌دامین (contains)
-      - has_http      : true/false — آیا ساب‌دامین در جدول http هست؟
-      - has_live      : true/false — آیا ساب‌دامین در جدول live_subdomains هست؟
+      - program       : Exact program name
+      - programs      : Comma-separated programs
+      - scope         : Root domain scope
+      - provider      : Exact provider name
+      - providers     : Comma-separated providers
+      - search        : Search substring in subdomain
+      - has_http      : true/false — Exists in http table?
+      - has_live      : true/false — Exists in live table?
       - created_after : YYYY-MM-DD
       - created_before: YYYY-MM-DD
       - updated_after : YYYY-MM-DD
       - updated_before: YYYY-MM-DD
-      - only_new      : true — ساب‌دامین‌های ۲۴ ساعت اخیر
-      - sort          : created_date / last_update / subdomain (پیشفرض: -created_date)
+      - only_new      : true — Created in last 24h
+      - sort          : created_date / last_update / subdomain
       - page, per_page
     """
     page, per_page = get_pagination_args()
     q = Subdomains.objects()
 
-    # فیلتر برنامه
+    # Program Filter
     program = request.args.get('program', '').strip()
     programs_csv = request.args.get('programs', '').strip()
     if program:
@@ -246,27 +250,26 @@ def get_subdomains():
         prog_list = [p.strip() for p in programs_csv.split(',') if p.strip()]
         q = q.filter(program_name__in=prog_list)
 
-    # فیلتر scope
+    # Scope Filter
     scope = request.args.get('scope', '').strip()
     if scope:
         q = q.filter(scope=scope)
 
-    # فیلتر provider
+    # Provider Filter
     provider = request.args.get('provider', '').strip()
     providers_csv = request.args.get('providers', '').strip()
     if provider:
         q = q.filter(providers=provider)
     elif providers_csv:
         prov_list = [p.strip() for p in providers_csv.split(',') if p.strip()]
-        # ساب‌دامین‌هایی که حداقل یکی از این providerها رو دارن
         q = q.filter(providers__in=prov_list)
 
-    # جستجو در نام
+    # Search Name
     search = request.args.get('search', '').strip()
     if search:
         q = q.filter(subdomain__icontains=search)
 
-    # فیلتر تاریخ ایجاد
+    # Creation Date Filter
     created_after = parse_date(request.args.get('created_after', ''))
     if created_after:
         q = q.filter(created_date__gte=created_after)
@@ -274,7 +277,7 @@ def get_subdomains():
     if created_before:
         q = q.filter(created_date__lte=created_before)
 
-    # فیلتر تاریخ آپدیت
+    # Update Date Filter
     updated_after = parse_date(request.args.get('updated_after', ''))
     if updated_after:
         q = q.filter(last_update__gte=updated_after)
@@ -282,11 +285,11 @@ def get_subdomains():
     if updated_before:
         q = q.filter(last_update__lte=updated_before)
 
-    # only_new: ۲۴ ساعت اخیر
+    # Only New Filter (Last 24h)
     if request.args.get('only_new', '').lower() == 'true':
         q = q.filter(created_date__gte=datetime.now() - timedelta(hours=24))
 
-    # فیلتر has_live / has_http — از طریق join روی subdomain
+    # Live / HTTP relation filters via distinct fetch
     has_live = request.args.get('has_live', '').lower()
     if has_live in ('true', 'false'):
         live_subs = set(LiveSubdomains.objects().distinct('subdomain'))
@@ -303,7 +306,7 @@ def get_subdomains():
         else:
             q = q.filter(subdomain__nin=http_subs)
 
-    # مرتب‌سازی
+    # Sorting
     sort_map = {
         'created_date': '+created_date',
         '-created_date': '-created_date',
@@ -327,22 +330,7 @@ def get_subdomains():
 @require_auth
 def get_lives():
     """
-    دریافت ساب‌دامین‌های زنده با فیلترهای پیشرفته.
-
-    Query Params:
-      - program       : نام برنامه
-      - programs      : چند برنامه با کاما
-      - scope         : دامنه اصلی
-      - search        : جستجو در subdomain
-      - ip            : فیلتر بر اساس یک IP خاص
-      - has_cdn       : true/false — آیا CDN دارد؟
-      - cdn           : نام CDN خاص (مثلاً cloudflare)
-      - has_http      : true/false — آیا HTTP سرویس دارد؟
-      - created_after, created_before
-      - updated_after, updated_before
-      - only_new      : true — ۲۴ ساعت اخیر
-      - sort          : created_date / last_update / subdomain
-      - page, per_page
+    Get live subdomains with advanced filtering.
     """
     page, per_page = get_pagination_args()
     q = LiveSubdomains.objects()
@@ -420,34 +408,34 @@ def get_lives():
 @require_auth
 def get_http():
     """
-    دریافت HTTP سرویس‌ها با فیلترهای پیشرفته.
+    Get HTTP services with advanced filtering.
 
     Query Params:
-      - program        : نام برنامه
-      - programs       : چند برنامه با کاما
-      - scope          : دامنه اصلی
-      - search         : جستجو در url/subdomain/title
-      - status_code    : کد وضعیت دقیق (200)
-      - status_codes   : چند کد با کاما (200,301,403)
-      - status_range   : محدوده کد (200-299)
-      - tech           : نام تکنولوژی خاص (nginx, wordpress, ...)
-      - techs          : چند تکنولوژی با کاما
-      - title          : جستجو در title
-      - ip             : فیلتر بر اساس IP
+      - program        : Program name
+      - programs       : Comma-separated programs
+      - scope          : Root domain scope
+      - search         : Search in url/subdomain/title
+      - status_code    : Exact status code (200)
+      - status_codes   : Comma-separated codes (200,301,403)
+      - status_range   : Code range (200-299)
+      - tech           : Specific technology (nginx, wordpress)
+      - techs          : Comma-separated tech names
+      - title          : Search in title
+      - ip             : Filter by IP
       - has_favicon    : true/false
-      - has_tech       : true/false — آیا تکنولوژی شناسایی شده؟
-      - header_key     : بررسی وجود یک header خاص (X-Powered-By)
-      - header_value   : مقدار header (با header_key ترکیب می‌شود)
-      - tested         : true/false — فیلتر بر اساس وضعیت تست شده یا نشده
-      - scan_status    : فیلتر بر اساس وضعیت اسکن (not_scanned / clean / findings / confirmed_vuln)
-      - scan_statuses  : چند وضعیت اسکن با کاما
-      - has_findings   : true/false — آیا یافته‌ای دارد؟
-      - min_confidence : HIGH/MEDIUM/LOW — حداقل سطح اطمینان یافته‌ها
-      - scanned_after, scanned_before : فیلتر تاریخ آخرین اسکن (فرمت تاریخ مشابه created_after)
+      - has_tech       : true/false — Is technology identified?
+      - header_key     : Check existence of a specific header (e.g. Server)
+      - header_value   : Header value (combined with header_key)
+      - tested         : true/false
+      - scan_status    : Status of the scan (not_scanned / clean / findings / confirmed_vuln)
+      - scan_statuses  : Comma-separated scan statuses
+      - has_findings   : true/false — Does it have findings?
+      - min_confidence : HIGH/MEDIUM/LOW — Minimum confidence level of findings
+      - scanned_after, scanned_before : Scan date filtering
       - created_after, created_before
       - updated_after, updated_before
-      - only_new       : true — ۲۴ ساعت اخیر
-      - only_changed   : true — آپدیت شده در ۲۴ ساعت اخیر
+      - only_new       : true — Last 24 hours
+      - only_changed   : true — Updated in last 24 hours
       - sort           : created_date / last_update / status_code / title / scan_status / last_scan_date
       - page, per_page
     """
@@ -465,7 +453,7 @@ def get_http():
     if scope:
         q = q.filter(scope=scope)
 
-    # جستجوی عمومی در url، title و subdomain
+    # General search in url, title, and subdomain
     search = request.args.get('search', '').strip()
     if search:
         q = q.filter(
@@ -474,7 +462,7 @@ def get_http():
             Q(title__icontains=search)
         )
 
-    # === فیلتر Status Code (هوشمند) ===
+    # === Status Code Filter (Smart Range/List Parser) ===
     status_query = request.args.get('status_code', '').strip()
     if status_query:
         if '-' in status_query:
@@ -490,7 +478,7 @@ def get_http():
         elif status_query.isdigit():
             q = q.filter(status_code=int(status_query))
 
-    # === فیلتر Technology (هوشمند) ===
+    # === Technology Filter ===
     tech_query = request.args.get('tech', '').strip()
     if tech_query:
         if ',' in tech_query:
@@ -500,20 +488,26 @@ def get_http():
         else:
             q = q.filter(tech__icontains=tech_query)
 
-    # جستجو در title
+    # Title search
     title = request.args.get('title', '').strip()
     if title:
         q = q.filter(title__icontains=title)
 
-    # فیلتر IP
+    # IP Filter
     ip = request.args.get('ip', '').strip()
     if ip:
         q = q.filter(ips=ip)
 
-    # فیلتر provider (case-insensitive)
+    # Has Tech Filter
+    has_tech = request.args.get('has_tech', '').lower()
+    if has_tech == 'true':
+        q = q.filter(tech__0__exists=True)
+    elif has_tech == 'false':
+        q = q.filter(Q(tech__exists=False) | Q(tech__size=0))
+
+    # Provider Filter (Case-insensitive)
     provider = request.args.get('provider', '').strip()
     if provider:
-        # جستجوی case-insensitive برای provider
         provider_lower = provider.lower()
         subdomains_with_provider = []
         for sd in Subdomains.objects().only('subdomain', 'providers'):
@@ -522,10 +516,9 @@ def get_http():
         if subdomains_with_provider:
             q = q.filter(subdomain__in=subdomains_with_provider)
         else:
-            # اگر هیچ subdomain پیدا نشد، نتیجه خالی کن
             q = q.filter(subdomain='__NO_MATCH__')
 
-    # فیلتر: فقط آن‌هایی که توسط یک پروایدر یافت شده‌اند
+    # Filter: Found only by a single provider
     only_single_provider = request.args.get('only_single_provider', '').lower()
     if only_single_provider == 'true':
         if provider:
@@ -540,14 +533,14 @@ def get_http():
         else:
             q = q.filter(subdomain='__NO_MATCH__')
 
-    # فیلتر favicon
+    # Favicon Filter
     has_favicon = request.args.get('has_favicon', '').lower()
     if has_favicon == 'true':
         q = q.filter(favicon__ne='').filter(favicon__exists=True)
     elif has_favicon == 'false':
         q = q.filter(Q(favicon='') | Q(favicon__exists=False))
 
-    # فیلتر header
+    # Headers Filter
     header_key = request.args.get('header_key', '').strip()
     if header_key:
         header_value = request.args.get('header_value', '').strip()
@@ -557,14 +550,14 @@ def get_http():
         else:
             q = q.filter(**{field + '__exists': True})
 
-    # فیلتر تست شده (tested)
+    # Tested Status Filter
     tested = request.args.get('tested', '').lower()
     if tested == 'true':
         q = q.filter(tested=True)
     elif tested == 'false':
         q = q.filter(tested=False)
 
-    # === فیلترهای جدید اسکن (Scan Artifacts) ===
+    # === Scan Artifacts Filters ===
     scan_status = request.args.get('scan_status', '').strip()
     if scan_status:
         q = q.filter(scan_status=scan_status)
@@ -588,7 +581,7 @@ def get_http():
         elif min_confidence == 'LOW':
             q = q.filter(findings__confidence__in=['HIGH', 'high', 'MEDIUM', 'medium', 'LOW', 'low'])
 
-    # تاریخ‌ها
+    # Date Filters
     scanned_after = parse_date(request.args.get('scanned_after', ''))
     if scanned_after:
         q = q.filter(last_scan_date__gte=scanned_after)
@@ -629,6 +622,7 @@ def get_http():
 
     total = q.count()
     http_objs = list(q.skip((page - 1) * per_page).limit(per_page))
+    
     subdomains = [h.subdomain for h in http_objs]
     provider_docs = Subdomains.objects(subdomain__in=subdomains).only('subdomain', 'providers')
     provider_map = {sd.subdomain: sd.providers for sd in provider_docs}
@@ -645,7 +639,7 @@ def get_http():
 @app.route('/api/http/<subdomain>', methods=['GET'])
 @require_auth
 def get_http_detail(subdomain):
-    """جزئیات کامل یک سرویس HTTP به همراه لیست کامل یافته‌های اسکن و context"""
+    """Full details of an HTTP service including findings array and context"""
     h = Http.objects(subdomain=subdomain).first()
     if not h:
         return jsonify({'error': 'Not found'}), 404
@@ -664,11 +658,11 @@ def get_http_detail(subdomain):
 @require_auth
 def set_tested_status():
     """
-    تغییر وضعیت تست شده (tested) برای یک تارگت خاص در تمام جداول.
-    Body JSON:
+    Toggle 'tested' status across all related collections.
+    Body JSON format:
     {
       "subdomain": "example.com",
-      "tested": true  // یا false
+      "tested": true  // or false
     }
     """
     data = request.get_json()
@@ -678,7 +672,7 @@ def set_tested_status():
     subdomain = data['subdomain']
     tested_status = bool(data['tested'])
 
-    # آپدیت وضعیت در تمام کالکشن‌ها به صورت همزمان (Bulk Update)
+    # Synchronized Bulk Update across all collections
     Subdomains.objects(subdomain=subdomain).update(set__tested=tested_status)
     LiveSubdomains.objects(subdomain=subdomain).update(set__tested=tested_status)
     Http.objects(subdomain=subdomain).update(set__tested=tested_status)
@@ -699,16 +693,8 @@ def set_tested_status():
 @require_auth
 def get_assets():
     """
-    دیدگاه ترکیبی: ساب‌دامین + وضعیت live + وضعیت HTTP در یک جواب.
-    مناسب برای صفحه اصلی داشبورد.
-
-    Query Params:
-      - program        : فیلتر برنامه
-      - scope          : فیلتر scope
-      - search         : جستجو در subdomain
-      - status         : all / live_only / http_only / both / none
-      - provider       : پروایدر خاص
-      - page, per_page
+    Combined view: Subdomain + Live + HTTP data in one payload.
+    Ideal for master dashboard feeds.
     """
     page, per_page = get_pagination_args()
 
@@ -731,7 +717,7 @@ def get_assets():
     total = q.count()
     subs = q.skip((page - 1) * per_page).limit(per_page)
 
-    # ایجاد map سریع برای live و http
+    # Fast mapping references
     sub_names = [s.subdomain for s in subs]
     live_map = {l.subdomain: l for l in LiveSubdomains.objects(subdomain__in=sub_names)}
     http_map = {h.subdomain: h for h in Http.objects(subdomain__in=sub_names)}
@@ -793,7 +779,7 @@ def get_assets():
 @app.route('/api/stats', methods=['GET'])
 @require_auth
 def global_stats():
-    """آمار کلی سیستم"""
+    """Global system statistics overview"""
     return jsonify({
         'programs': Programs.objects().count(),
         'subdomains': Subdomains.objects().count(),
@@ -812,39 +798,39 @@ def global_stats():
 @app.route('/api/stats/program/<program_name>', methods=['GET'])
 @require_auth
 def program_stats(program_name):
-    """آمار دقیق یک برنامه"""
+    """Detailed statistics for a specific program"""
     program = Programs.objects(program_name=program_name).first()
     if not program:
         return jsonify({'error': 'Program not found'}), 404
 
-    # توزیع status code
+    # Status Code Distribution
     http_objs = Http.objects(program_name=program_name)
     status_dist = {}
     for h in http_objs:
         key = str(h.status_code)
         status_dist[key] = status_dist.get(key, 0) + 1
 
-    # توزیع CDN
+    # CDN Distribution
     live_objs = LiveSubdomains.objects(program_name=program_name)
     cdn_dist = {}
     for l in live_objs:
         cdn = l.cdn or 'none'
         cdn_dist[cdn] = cdn_dist.get(cdn, 0) + 1
 
-    # توزیع provider
+    # Provider Distribution
     subs = Subdomains.objects(program_name=program_name)
     provider_dist = {}
     for s in subs:
         for p in s.providers:
             provider_dist[p] = provider_dist.get(p, 0) + 1
 
-    # توزیع tech
+    # Technology Distribution
     tech_dist = {}
     for h in http_objs:
         for t in h.tech:
             tech_dist[t] = tech_dist.get(t, 0) + 1
 
-    # top 10 تکنولوژی
+    # Top 10 Technologies
     top_techs = sorted(tech_dist.items(), key=lambda x: x[1], reverse=True)[:10]
 
     return jsonify({
@@ -878,10 +864,10 @@ def program_stats(program_name):
 @require_auth
 def timeline_stats():
     """
-    آمار روزانه کشف دارایی‌ها در ۳۰ روز گذشته.
+    Daily asset discovery statistics for the last N days.
     Params:
-      - program : اختیاری — محدود به یک برنامه
-      - days    : تعداد روز (پیشفرض: 30)
+      - program : Optional — restrict to a specific program
+      - days    : Lookback period in days (default: 30)
     """
     program = request.args.get('program', '').strip()
     days = request.args.get('days', 30, type=int)
@@ -910,9 +896,9 @@ def timeline_stats():
 @require_auth
 def get_scan_stats():
     """
-    آمار وضعیت‌های اسکن و یافته‌ها
+    Scan status and findings statistics overview.
     Params:
-      - program : اختیاری — محدود به یک برنامه
+      - program : Optional — restrict to a specific program
     """
     program = request.args.get('program', '').strip()
     q = Http.objects()
@@ -929,13 +915,13 @@ def get_scan_stats():
 
 
 # ==========================================
-# Lookup & Meta — برای populate کردن فیلترها در UI
+# Lookup & Meta — Data Population for UI dropdowns
 # ==========================================
 
 @app.route('/api/meta/providers', methods=['GET'])
 @require_auth
 def get_providers():
-    """لیست تمام providerهای شناخته شده (برای dropdown فیلتر)"""
+    """List of all known providers"""
     program = request.args.get('program', '').strip()
     q = Subdomains.objects()
     if program:
@@ -949,7 +935,7 @@ def get_providers():
 @app.route('/api/meta/techs', methods=['GET'])
 @require_auth
 def get_techs():
-    """لیست تمام تکنولوژی‌های شناسایی شده (برای dropdown فیلتر)"""
+    """List of all identified technologies (ranked)"""
     program = request.args.get('program', '').strip()
     q = Http.objects()
     if program:
@@ -965,7 +951,7 @@ def get_techs():
 @app.route('/api/meta/cdns', methods=['GET'])
 @require_auth
 def get_cdns():
-    """لیست CDNهای شناسایی شده"""
+    """List of identified CDNs (ranked)"""
     program = request.args.get('program', '').strip()
     q = LiveSubdomains.objects(cdn__ne='')
     if program:
@@ -980,7 +966,7 @@ def get_cdns():
 @app.route('/api/meta/scopes', methods=['GET'])
 @require_auth
 def get_scopes():
-    """لیست scopes برای فیلتر"""
+    """List of scopes"""
     program = request.args.get('program', '').strip()
     if program:
         p = Programs.objects(program_name=program).first()
@@ -994,7 +980,7 @@ def get_scopes():
 @app.route('/api/meta/ips', methods=['GET'])
 @require_auth
 def get_ips():
-    """لیست IP‌های منحصربه‌فرد (با فیلتر برنامه)"""
+    """List of unique IP addresses"""
     program = request.args.get('program', '').strip()
     q = Http.objects()
     if program:
@@ -1006,18 +992,18 @@ def get_ips():
 
 
 # ==========================================
-# Search — جستجوی سراسری
+# Search — Global Search Aggregation
 # ==========================================
 
 @app.route('/api/search', methods=['GET'])
 @require_auth
 def global_search():
     """
-    جستجوی سراسری در تمام جداول.
+    Cross-collection global search.
     Params:
-      - q       : رشته جستجو (الزامی، حداقل ۳ کاراکتر)
-      - program : محدود کردن به برنامه خاص
-      - limit   : حداکثر تعداد نتیجه از هر دسته (پیشفرض: 10)
+      - q       : Query string (required, min 3 chars)
+      - program : Filter by program scope
+      - limit   : Result cap per collection (default: 10)
     """
     query = request.args.get('q', '').strip()
     program = request.args.get('program', '').strip()
@@ -1048,16 +1034,15 @@ def global_search():
 
 
 # ==========================================
-# Export
+# Export Endpoints
 # ==========================================
 
 @app.route('/api/export/subdomains', methods=['GET'])
 @require_auth
 def export_subdomains():
     """
-    خروجی plain text از ساب‌دامین‌ها (یک خط یک دامنه).
-    همان فیلترهای /api/subdomains را می‌پذیرد.
-    مناسب برای pipe کردن مستقیم به ابزارهای ریکان.
+    Export plain text subdomains (1 per line).
+    Useful for piping directly to standard recon tooling.
     """
     q = Subdomains.objects()
     program = request.args.get('program', '').strip()
@@ -1088,7 +1073,7 @@ def export_subdomains():
 @app.route('/api/export/urls', methods=['GET'])
 @require_auth
 def export_urls():
-    """خروجی plain text از URLها — مستقیم برای ابزارها"""
+    """Export plain text URLs directly for HTTP vulnerability scanners"""
     q = Http.objects()
     program = request.args.get('program', '').strip()
     scope = request.args.get('scope', '').strip()
@@ -1108,9 +1093,7 @@ def export_urls():
 @app.route('/api/export/lives', methods=['GET'])
 @require_auth
 def export_lives():
-    """
-    خروجی plain text از ساب‌دامین‌های زنده (یک خط یک دامنه).
-    """
+    """Export plain text live subdomains (1 per line)"""
     q = LiveSubdomains.objects()
     program = request.args.get('program', '').strip()
     scope = request.args.get('scope', '').strip()
@@ -1136,9 +1119,7 @@ def export_lives():
 @app.route('/api/export/lives/ips', methods=['GET'])
 @require_auth
 def export_lives_ips():
-    """
-    خروجی plain text از تمام IPهای ساب‌دامین‌های زنده (یک خط یک IP بدون تکرار).
-    """
+    """Export plain text list of all unique IP addresses mapped to live assets"""
     q = LiveSubdomains.objects()
     program = request.args.get('program', '').strip()
     scope = request.args.get('scope', '').strip()
@@ -1157,14 +1138,13 @@ def export_lives_ips():
     elif has_cdn == 'false':
         q = q.filter(Q(cdn='') | Q(cdn__exists=False))
 
-    # استخراج IPهای یونیک
+    # Extract unique IPs
     unique_ips = set()
     for l in q.only('ips'):
         for ip in l.ips:
-            if ip:  # اطمینان از خالی نبودن
+            if ip:
                 unique_ips.add(ip)
 
-    # مرتب‌سازی IPها و تبدیل به رشته
     text = '\n'.join(sorted(list(unique_ips)))
     return app.response_class(text, mimetype='text/plain')
 
@@ -1173,12 +1153,12 @@ def export_lives_ips():
 @require_auth
 def export_findings():
     """
-    خروجی JSON از تمام یافته‌ها (تخت شده - یک یافته در هر ردیف).
+    Export all findings flattened into a JSON payload.
     Query Params:
-      - program        : نام برنامه
-      - scope          : دامنه اصلی
+      - program        : Program Name
+      - scope          : Root domain
       - min_confidence : HIGH/MEDIUM/LOW
-      - page, per_page : صفحه‌بندی روی یافته‌های استخراج‌شده
+      - page, per_page : Applied to the flattened list of findings
     """
     program = request.args.get('program', '').strip()
     scope = request.args.get('scope', '').strip()
@@ -1215,7 +1195,7 @@ def export_findings():
                 'finding': f
             })
 
-    # Pagination logic over flattened findings list
+    # Flattened Pagination
     total = len(all_findings)
     start = (page - 1) * per_page
     end = start + per_page
