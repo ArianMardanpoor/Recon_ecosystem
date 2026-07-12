@@ -31,7 +31,8 @@ if not (MONGO_URI.startswith("mongodb+srv://") or MONGO_URI.startswith("mongodb:
 connect_kwargs = {
     "db": "watchtower",
     "host": MONGO_URI,
-    "alias": "default"
+    "alias": "default",
+    "serverSelectionTimeoutMS": 60000
 }
 
 # اجبار استفاده از TLS/SSL برای کلاسترهای Atlas

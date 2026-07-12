@@ -1,0 +1,25 @@
+[Unit]
+Description=Watchtower recon watch loop (watch.sh + xsscanner, continuous)
+After=network.target watchtower-api.service
+
+[Service]
+Type=simple
+User=watchtower
+WorkingDirectory=/opt/recon-ecosystem/watchtower
+
+# watch.sh already does: sync programs -> enum -> dns -> http probing,
+# then run_all.sh (called from outside systemd, see watch-loop.sh below)
+# also chains into xsscanner. We wrap both in one small script so systemd
+# can supervise a single long-running process and restart it cleanly.
+ExecStart=/opt/recon-ecosystem/deploy/systemd/watch-loop.sh
+
+Restart=on-failure
+RestartSec=30
+
+# This does real recon work (subprocess forks, network scans) — give it
+# room, don't sandbox network/user namespaces here.
+StandardOutput=append:/var/log/watchtower/watch-loop.log
+StandardError=append:/var/log/watchtower/watch-loop.error.log
+
+[Install]
+WantedBy=multi-user.target

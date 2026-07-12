@@ -1,0 +1,32 @@
+[Unit]
+Description=Watchtower Frontend (built static + node server)
+After=network.target watchtower-api.service
+
+[Service]
+Type=simple
+User=watchtower
+WorkingDirectory=/opt/recon-ecosystem/watchtower-frontend
+
+# Loads VITE_API_URL, VITE_API_TOKEN, etc. — used at BUILD time by Vite,
+# but harmless to also load here for the runtime Node server.
+EnvironmentFile=/opt/recon-ecosystem/watchtower-frontend/.env
+
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# Run `pnpm build` once manually (or via a deploy script) before enabling
+# this service — it serves the already-built dist/ output, it does not
+# rebuild on start.
+ExecStart=/usr/bin/node /opt/recon-ecosystem/watchtower-frontend/dist/index.js
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=append:/var/log/watchtower/frontend.log
+StandardError=append:/var/log/watchtower/frontend.error.log
+
+[Install]
+WantedBy=multi-user.target

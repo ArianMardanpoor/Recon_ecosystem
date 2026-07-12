@@ -38,7 +38,7 @@ if __name__ == "__main__":
     print(f"[{current_time()}] Starting {len(commands_to_run)} enumeration tasks...")
     
     # اجرای موازی ماژول‌ها
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         executor.map(run_module, commands_to_run)
         
     print(f"[{current_time()}] All enumeration modules finished. Starting DNS Resolution...")
