@@ -1,30 +1,59 @@
 #!/bin/bash
-set -uo pipefail  # NOTE: not -e — we want to report failures per-step, not die on the first one
+# install_tools_vps.sh
+# VPS-friendly replacement for .devcontainer/install_tools.sh
+#
+# Differences from the Codespaces version:
+#   - REPO_ROOT is resolved from this script's own location, not from
+#     the Codespaces-specific "parent of cwd" assumption.
+#   - No dependency on the Codespaces/devcontainer environment at all.
+#   - Safe to re-run (idempotent-ish); every step is independent and
+#     failures are collected instead of aborting the whole run.
+#
+# Usage:
+#   git clone <your-repo> /opt/recon-ecosystem   (or wherever you like)
+#   cd /opt/recon-ecosystem
+#   sudo bash deploy/install_tools_vps.sh
+#
+set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "=== 📍 Current Repo Root: $REPO_ROOT ==="
+# Resolve repo root from this script's real location (works no matter
+# where you put the repo: /opt, /srv, $HOME, etc.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+echo "=== 📍 Repo Root: $REPO_ROOT ==="
 
 FAILED_STEPS=()
 step() { echo -e "\n=== $1 ==="; }
 check() { if [ $? -ne 0 ]; then FAILED_STEPS+=("$1"); echo "[!] FAILED: $1"; fi; }
 
-# Make sure GOPATH/bin and cargo bin are on PATH for the REST of this script run
 export GOPATH="${GOPATH:-$HOME/go}"
 export PATH="$PATH:$GOPATH/bin:$HOME/.cargo/bin:/usr/local/bin"
 
 step "[1/7] System deps + pnpm"
 sudo apt-get update -qq
-sudo apt-get install -y python3-pip python3-venv npm libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+sudo apt-get install -y python3-pip python3-venv npm git curl unzip libnss3 libatk1.0-0 libatk-bridge2.0-0 \
     libcups2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
     libasound2t64 2>/dev/null || sudo apt-get install -y libasound2
 sudo npm install -g pnpm
 check "system deps"
 
-step "[2/7] Go recon tools (subfinder, katana, nuclei, httpx, dnsx, assetfinder, gau, waybackurls)"
+# Ensure Go is installed (Codespaces devcontainer had a feature for this;
+# on a bare VPS we install it manually if missing)
+if ! command -v go &> /dev/null; then
+    step "[1b/7] Installing Go toolchain"
+    GO_VERSION="1.23.4"
+    curl -sSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+    export PATH="$PATH:/usr/local/go/bin"
+    echo 'export PATH="$PATH:/usr/local/go/bin"' | sudo tee -a /etc/profile.d/golang.sh
+    check "go install"
+fi
+
+step "[2/7] Go recon tools (subfinder, katana, nuclei, httpx, dnsx, gau, waybackurls)"
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 go install -v github.com/lc/gau/v2/cmd/gau@latest
@@ -34,8 +63,7 @@ check "projectdiscovery/go tools"
 pip3 install uro --break-system-packages
 check "uro"
 
-# amass is slow/flaky to build from source on every fresh Codespace — use prebuilt release instead
-step "[3/7] amass (prebuilt binary, avoids slow/flaky go install)"
+step "[3/7] amass (prebuilt binary)"
 AMASS_VER="v4.2.0"
 curl -sSL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.zip" -o /tmp/amass.zip \
   && sudo unzip -o -j /tmp/amass.zip "amass_Linux_amd64/amass" -d /usr/local/bin \
@@ -58,7 +86,6 @@ check "x8"
 go install github.com/ImAyrix/fallparams@latest
 check "fallparams"
 
-# copy any freshly-built go binaries into a system-wide path too (belt & suspenders)
 sudo cp "$GOPATH"/bin/* /usr/local/bin/ 2>/dev/null || true
 
 step "[5/7] Update nuclei templates"
@@ -73,7 +100,7 @@ step "[6/7] Compile xsscanner Go modules"
 cd "$REPO_ROOT"
 if [ -d "xsscanner" ]; then
     cd xsscanner
-    go mod tidy   # safer than go mod download alone if go.mod version drifted
+    go mod tidy
     for bin in nice_passive nice_katana nice_params xssniper xsscanner dom_sink_checker x9; do
         src="${bin}.go"
         [ "$bin" = "xsscanner" ] && src="main.go"
@@ -88,29 +115,33 @@ else
     FAILED_STEPS+=("xsscanner dir missing")
 fi
 
-step "[7/7] Aliases, permissions, Python venv, database"
-cat << 'EOF' >> ~/.bashrc
-
-# Watchtower Aliases Automatically Added
-export PATH="$PATH:$HOME/go/bin:$HOME/.cargo/bin"
-alias watch_sync_programs="python3 ~/watchtower/programs/watch_sync_program.py"
-alias watch_subfinder="python3 ~/watchtower/enum/watch_subfinder.py"
-alias watch_crtsh="python3 ~/watchtower/enum/watch_crtsh.py"
-alias watch_enum_all="python3 ~/watchtower/enum/watch_enum_all.py"
-alias watch_abuseipdb="python3 ~/watchtower/enum/watch_abuseipdb.py"
-alias watch_ns="python3 ~/watchtower/ns/watch_ns.py"
-alias watch_ns_all="python3 ~/watchtower/ns/watch_ns_all.py"
-alias watch_http="python3 ~/watchtower/http/watch_http.py"
-alias watch_http_all="python3 ~/watchtower/http/watch_http_all.py"
-alias watch_nuclei_all="python3 ~/watchtower/nuclei/watch_nuclei_all.py"
+step "[7/7] Aliases, permissions, Python venv"
+PROFILE_SNIPPET="$HOME/.watchtower_env"
+cat << EOF > "$PROFILE_SNIPPET"
+# Watchtower Aliases - managed by install_tools_vps.sh
+export PATH="\$PATH:\$HOME/go/bin:\$HOME/.cargo/bin:/usr/local/go/bin"
+export WATCHTOWER_REPO_ROOT="$REPO_ROOT"
+alias watch_sync_programs="python3 $REPO_ROOT/watchtower/programs/watch_sync_program.py"
+alias watch_subfinder="python3 $REPO_ROOT/watchtower/enum/watch_subfinder.py"
+alias watch_crtsh="python3 $REPO_ROOT/watchtower/enum/watch_crtsh.py"
+alias watch_enum_all="python3 $REPO_ROOT/watchtower/enum/watch_enum_all.py"
+alias watch_abuseipdb="python3 $REPO_ROOT/watchtower/enum/watch_abuseipdb.py"
+alias watch_ns="python3 $REPO_ROOT/watchtower/ns/watch_ns.py"
+alias watch_ns_all="python3 $REPO_ROOT/watchtower/ns/watch_ns_all.py"
+alias watch_http="python3 $REPO_ROOT/watchtower/http/watch_http.py"
+alias watch_http_all="python3 $REPO_ROOT/watchtower/http/watch_http_all.py"
+alias watch_nuclei_all="python3 $REPO_ROOT/watchtower/nuclei/watch_nuclei_all.py"
 EOF
 
-cd "$REPO_ROOT"
-chmod +x run_all.sh 2>/dev/null
-[ -d "watchtower" ] && chmod +x watchtower/watch.sh 2>/dev/null
+if ! grep -q "watchtower_env" ~/.bashrc 2>/dev/null; then
+    echo "source $PROFILE_SNIPPET" >> ~/.bashrc
+fi
 
-if [ -d "watchtower" ]; then
-    cd watchtower
+chmod +x "$REPO_ROOT/run_all.sh" 2>/dev/null
+[ -d "$REPO_ROOT/watchtower" ] && chmod +x "$REPO_ROOT/watchtower/watch.sh" 2>/dev/null
+
+if [ -d "$REPO_ROOT/watchtower" ]; then
+    cd "$REPO_ROOT/watchtower"
     python3 -m venv venv
     source venv/bin/activate
     pip install --upgrade pip -q
@@ -125,22 +156,6 @@ else
     FAILED_STEPS+=("watchtower dir missing")
 fi
 
-if [ -d "watchtower/database" ] && command -v docker &> /dev/null; then
-    # wait for docker daemon (dind feature can take a few seconds to come up)
-    for i in $(seq 1 15); do
-        docker info &>/dev/null && break
-        echo "[..] waiting for docker daemon ($i/15)"
-        sleep 2
-    done
-    cd watchtower/database
-    docker compose up --build -d
-    check "docker compose"
-    cd "$REPO_ROOT"
-else
-    echo "[!] docker not available or watchtower/database missing — skipping DB container start"
-    echo "    (add the docker-in-docker feature to devcontainer.json if you need Mongo in-container)"
-fi
-
 echo
 echo "=================================================="
 if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
@@ -148,7 +163,13 @@ if [ ${#FAILED_STEPS[@]} -eq 0 ]; then
 else
     echo "⚠️  Setup finished with ${#FAILED_STEPS[@]} failed step(s):"
     printf '   - %s\n' "${FAILED_STEPS[@]}"
-    echo "Re-run this script after fixing the above, or run the corresponding block manually."
 fi
 echo "=================================================="
-echo "Run 'source ~/.bashrc' or open a new terminal to get the watch_* aliases and PATH updates."
+echo "Repo root recorded at: $REPO_ROOT"
+echo "Run 'source ~/.bashrc' or open a new terminal to get watch_* aliases."
+echo
+echo "Next steps:"
+echo "  1. Copy watchtower/.env.example to watchtower/.env and fill in MONGO_URI etc."
+echo "  2. Copy watchtower-frontend/.env.example to watchtower-frontend/.env"
+echo "  3. Copy xsscanner/.env.example to xsscanner/.env"
+echo "  4. Install the systemd units in deploy/systemd/ (see README there)"
