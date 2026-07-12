@@ -1224,4 +1224,9 @@ if __name__ == '__main__':
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handler)
+    
+    # NOTE FOR PRODUCTION:
+    # Flask dev server is strictly for local debugging. 
+    # In production, run this app using Gunicorn:
+    # gunicorn -w 4 -b 127.0.0.1:3131 --timeout 120 app:app
     app.run(host='127.0.0.1', port=3131, debug=False)

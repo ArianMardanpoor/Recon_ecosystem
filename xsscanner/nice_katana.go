@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -11,9 +12,21 @@ import (
 	"time"
 )
 
+// بررسی پشتیبانی باینری کاتانا از فلگ jsluice
+func supportsJsluice() bool {
+	cmd := exec.Command("katana", "-h")
+	out, _ := cmd.CombinedOutput()
+	return strings.Contains(string(out), "-jsluice")
+}
+
 func main() {
 	var outDir string
 	flag.StringVar(&outDir, "o", "results/katana", "Output directory")
+
+	// اضافه شدن فلگ verbose
+	var verbose bool
+	flag.BoolVar(&verbose, "verbose", false, "Print full katana command before execution")
+
 	flag.Parse()
 
 	var targets []string
@@ -58,10 +71,10 @@ func main() {
 
 	fmt.Printf("%s[STARTUP] nice_katana processing batch size: %d URLs%s\n", gray, len(targets), reset)
 
-	runNiceKatanaBatch(targets, outDir)
+	runNiceKatanaBatch(targets, outDir, verbose)
 }
 
-func runNiceKatanaBatch(targets []string, outDir string) {
+func runNiceKatanaBatch(targets []string, outDir string, verbose bool) {
 	if len(targets) == 0 {
 		return
 	}
@@ -84,9 +97,12 @@ func runNiceKatanaBatch(targets []string, outDir string) {
 	}
 
 	katanaOutput := filepath.Join(outDir, "katana_batch_output.txt")
-	extFilter := "json,js,fnt,ogg,css,jpg,jpeg,png,svg,img,gif,exe,mp4,flv,pdf,doc,ogv,webm,wmv,webp,mov,mp3,m4a,m4p,ppt,pptx,scss,tif,tiff,ttf,otf,woff,woff2,bmp,ico,eot,htc,swf,rtf,image,rf,txt,ml,ip"
+
+	// اصلاح رشته فیلتر (ml و ip به xml و zip تغییر کردند)
+	extFilter := "json,js,fnt,ogg,css,jpg,jpeg,png,svg,img,gif,exe,mp4,flv,pdf,doc,ogv,webm,wmv,webp,mov,mp3,m4a,m4p,ppt,pptx,scss,tif,tiff,ttf,otf,woff,woff2,bmp,ico,eot,htc,swf,rtf,image,rf,txt,xml,zip"
 
 	gray := "\033[1;30m"
+	yellow := "\033[1;33m"
 	reset := "\033[0m"
 
 	fmt.Printf("%sExecuting Katana (Batch mode, rate-limited) for %d targets%s\n", gray, len(targets), reset)
@@ -95,7 +111,6 @@ func runNiceKatanaBatch(targets []string, outDir string) {
 		"-list", tmpFile.Name(),
 		"-d", "2",
 		"-js-crawl",
-		"-jsluice",
 		"-known-files", "all",
 		"-automatic-form-fill",
 		"-extension-filter", extFilter,
@@ -109,7 +124,23 @@ func runNiceKatanaBatch(targets []string, outDir string) {
 		"-o", katanaOutput,
 	}
 
+	// بررسی و افزودن امن فلگ jsluice
+	if supportsJsluice() {
+		ctxArgs = append(ctxArgs, "-jsluice")
+	} else {
+		fmt.Printf("%s[WARNING] Installed katana binary does not support -jsluice flag. Skipping it.%s\n", yellow, reset)
+	}
+
 	cmd := exec.Command("katana", ctxArgs...)
+
+	// گرفتن خروجی Stderr
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	// نمایش دستور کامل در حالت verbose
+	if verbose {
+		fmt.Printf("%s[VERBOSE] Command: katana %s%s\n", gray, strings.Join(ctxArgs, " "), reset)
+	}
 
 	timeoutDuration := time.Duration(15*len(targets)) * time.Minute
 	if timeoutDuration > 3*time.Hour {
@@ -123,6 +154,10 @@ func runNiceKatanaBatch(targets []string, outDir string) {
 	case err := <-done:
 		if err != nil {
 			fmt.Printf("Error running katana batch: %v\n", err)
+			// در صورت خطا، محتوای Stderr به طور کامل چاپ می‌شود
+			if stderrBuf.Len() > 0 {
+				fmt.Printf("Katana Stderr:\n%s\n", stderrBuf.String())
+			}
 			return
 		}
 	case <-time.After(timeoutDuration):

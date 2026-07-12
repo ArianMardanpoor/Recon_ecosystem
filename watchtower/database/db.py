@@ -1,4 +1,6 @@
 from mongoengine import Document, StringField, DateTimeField, ListField, DictField, IntField, BooleanField, connect
+from mongoengine.connection import get_connection
+from pymongo.errors import ConnectionFailure
 from pymongo import UpdateOne 
 from datetime import datetime
 import tldextract
@@ -13,12 +15,45 @@ from utils.notify import queue_new_http, queue_http_change
 def current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+# ==========================================
+# Database Connection Setup & Validation
+# ==========================================
+MONGO_URI = os.getenv("MONGO_URI")
+
+# 1. بررسی وجود متغیر محیطی
+if not MONGO_URI or not MONGO_URI.strip():
+    raise RuntimeError("CRITICAL: MONGO_URI is not set or is empty. Please set it in your environment variables.")
+
+# 2. بررسی ساختار connection string
+if not (MONGO_URI.startswith("mongodb+srv://") or MONGO_URI.startswith("mongodb://")):
+    raise RuntimeError("CRITICAL: Invalid MONGO_URI format. Connection string must start with 'mongodb+srv://' or 'mongodb://'.")
+
+connect_kwargs = {
+    "db": "watchtower",
+    "host": MONGO_URI,
+    "alias": "default"
+}
+
+# اجبار استفاده از TLS/SSL برای کلاسترهای Atlas
+if MONGO_URI.startswith("mongodb+srv://"):
+    connect_kwargs["tls"] = True
+
 # اتصال به MongoDB
-connect(
-    db="watchtower",
-    host=os.getenv("MONGO_URI"),
-    alias="default"
-)
+connect(**connect_kwargs)
+
+def check_db_connection():
+    """
+    بررسی سلامت اتصال به دیتابیس. 
+    این تابع باید در app.py قبل از app.run() فراخوانی شود.
+    """
+    try:
+        client = get_connection(alias="default")
+        client.admin.command('ping')
+        print(f"[{current_time()}] Database health-check passed successfully.")
+    except ConnectionFailure as e:
+        raise RuntimeError(f"CRITICAL: Failed to connect to MongoDB. Check your network, MONGO_URI, or Atlas IP Access List. Details: {e}")
+    except Exception as e:
+        raise RuntimeError(f"CRITICAL: Unexpected error during database health-check: {e}")
 
 def get_domain_name(url):
     """استخراج دامنه اصلی از URL یا ساب‌دامین"""
@@ -66,13 +101,12 @@ class Programs(Document):
         ]
     }
 
-
 class Subdomains(Document):
     program_name = StringField(required=True)
     subdomain = StringField(required=True)
     scope = StringField(required=True)
     providers = ListField(StringField(), default=[])
-    tested = BooleanField(default=False)  # اضافه شدن فیلد tested
+    tested = BooleanField(default=False)
     last_update = DateTimeField(default=datetime.now)
     created_date = DateTimeField(default=datetime.now)
     
@@ -83,14 +117,13 @@ class Subdomains(Document):
         ]
     }
 
-
 class LiveSubdomains(Document):
     program_name = StringField(required=True)
     subdomain = StringField(required=True, unique=True)
     scope = StringField(required=True)
     ips = ListField(StringField(), default=[])
     cdn = StringField(default="")
-    tested = BooleanField(default=False)  # اضافه شدن فیلد tested
+    tested = BooleanField(default=False)
     created_date = DateTimeField(default=datetime.now)
     last_update = DateTimeField(default=datetime.now)
     
@@ -100,7 +133,6 @@ class LiveSubdomains(Document):
             {'fields': ['program_name', 'subdomain'], 'unique': True}
         ]
     }
-
 
 class Http(Document):
     program_name = StringField(required=True)
@@ -114,7 +146,7 @@ class Http(Document):
     url = StringField()
     final_url = StringField()
     favicon = StringField()
-    tested = BooleanField(default=False)  # اضافه شدن فیلد tested
+    tested = BooleanField(default=False)
     
     # New Recon/XSS Pipeline Artifacts
     passive_urls = ListField(StringField(), default=[])
@@ -175,7 +207,6 @@ def upsert_program(program_name, scopes, outofscopes, config=None):
         new_program.save()
         print(f"[{current_time()}] Inserted new program: {program_name}")
 
-
 def upsert_subdomain(program_name, subdomain_name, provider):
     """درج یا بروزرسانی یک ساب‌دامین تکی با بررسی scope"""
     program = Programs.objects(program_name=program_name).first()
@@ -184,7 +215,6 @@ def upsert_subdomain(program_name, subdomain_name, provider):
         print(f"[{current_time()}] Program not found: {program_name}")
         return False
     
-    # گرفتن رجکس‌ها از کانفیگ
     regex_filters = program.config.get("regex_filters", [])
     
     if not is_in_scope(subdomain_name, program.scopes, program.outofscopes, regex_filters):
@@ -214,7 +244,6 @@ def upsert_subdomain(program_name, subdomain_name, provider):
     
     return True
 
-
 def bulk_upsert_subdomains(program_name, subdomains_list, provider):
     """درج یا بروزرسانی گروهی ساب‌دامین‌ها برای سرعت فوق‌العاده بالا"""
     program = Programs.objects(program_name=program_name).first()
@@ -231,14 +260,12 @@ def bulk_upsert_subdomains(program_name, subdomains_list, provider):
         sub = sub.strip().lower()
         if not sub: continue
         
-        # بررسی scope با رجکس
         if not is_in_scope(sub, program.scopes, program.outofscopes, regex_filters):
             continue
             
         scope_domain = get_domain_name(sub)
         valid_subs += 1
         
-        # ساخت کوئری آپدیت برای Bulk
         operations.append(
             UpdateOne(
                 {'program_name': program_name, 'subdomain': sub},
@@ -246,7 +273,7 @@ def bulk_upsert_subdomains(program_name, subdomains_list, provider):
                     '$setOnInsert': {
                         'scope': scope_domain,
                         'created_date': datetime.now(),
-                        'tested': False  # مقدار پیش‌فرض زمان ساخت رکورد
+                        'tested': False
                     },
                     '$addToSet': {'providers': provider},
                     '$set': {'last_update': datetime.now()}
@@ -257,11 +284,10 @@ def bulk_upsert_subdomains(program_name, subdomains_list, provider):
     
     if operations:
         collection = Subdomains._get_collection()
-        result = collection.bulk_write(operations, ordered=False)
+        collection.bulk_write(operations, ordered=False)
         print(f"[{current_time()}] Bulk Upsert: {valid_subs} domains processed for {program_name} by {provider}")
     
     return True
-
 
 def upsert_live(obj):
     """درج یا بروزرسانی ساب‌دامین زنده"""
@@ -302,7 +328,6 @@ def upsert_live(obj):
         print(f"[{current_time()}] Inserted new live subdomain: {obj.get('subdomain')}")
     
     return True
-
 
 def upsert_http(obj):
     """درج یا بروزرسانی اطلاعات HTTP"""
@@ -374,7 +399,6 @@ def upsert_http(obj):
     
     return True
 
-
 def upsert_scan_artifacts(subdomain, passive_urls=None, crawled_urls=None, discovered_params=None):
     """درج یا بروزرسانی نتایج پایپ‌لاین اسکن برای یک ساب‌دامین"""
     http_doc = Http.objects(subdomain=subdomain).first()
@@ -394,7 +418,6 @@ def upsert_scan_artifacts(subdomain, passive_urls=None, crawled_urls=None, disco
     http_doc.save()
     
     return True
-
 
 def upsert_scan_findings(subdomain, findings_list, scan_status, force=False):
     """درج یا بروزرسانی یافته‌های آسیب‌پذیری پایپ‌لاین"""
@@ -426,14 +449,12 @@ def upsert_scan_findings(subdomain, findings_list, scan_status, force=False):
             
     http_doc.findings = list(merged_findings.values())
     
-    # Determine new scan status based on merged findings
     calculated_status = "clean"
     if http_doc.findings:
         calculated_status = "findings"
         if any(str(f.get('confidence')).upper() == 'HIGH' for f in http_doc.findings):
             calculated_status = "confirmed_vuln"
             
-    # Protect from downgrade unless forced
     if not force and http_doc.scan_status == "confirmed_vuln" and calculated_status != "confirmed_vuln":
         new_status = "confirmed_vuln"
     else:

@@ -1772,8 +1772,16 @@ func main() {
 	flag.BoolVar(&allowWildcards, "allow-wildcards", false, "Allow wildcard URLs")
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
+	// Add these to your var block in main()
+	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
+	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")
+	hcTimeoutFlag := flag.Duration("hc-timeout", 5*time.Second, "Proxy health-check timeout")
 	flag.Parse()
-	ratelimit.StartServer()
+	ratelimit.Init(ratelimit.Config{
+    ReqPerSec:           *rateLimitFlag,
+    HealthCheckInterval: *hcIntervalFlag,
+    HealthCheckTimeout:  *hcTimeoutFlag,
+})
 
 	// ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
 	_ = ratelimit.LoadProxies("proxies.txt")
