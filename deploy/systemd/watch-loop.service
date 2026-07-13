@@ -5,7 +5,7 @@ After=network.target watchtower-api.service
 [Service]
 Type=simple
 User=watchtower
-WorkingDirectory=/opt/recon-ecosystem/watchtower
+WorkingDirectory=/opt/Recon-ecosystem/watchtower
 
 # watch.sh already does: sync programs -> enum -> dns -> http probing,
 # then run_all.sh (called from outside systemd, see watch-loop.sh below)
