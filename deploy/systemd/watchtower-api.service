@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 # EDIT these two paths to match your actual deployment location and user
 User=watchtower
-WorkingDirectory=/opt/recon-ecosystem/watchtower
+WorkingDirectory=/opt/Recon-ecosystem/watchtower
 
 # Loads MONGO_URI, WATCHTOWER_API_TOKEN, TELEGRAM_*, etc.
 EnvironmentFile=/opt/recon-ecosystem/watchtower/.env

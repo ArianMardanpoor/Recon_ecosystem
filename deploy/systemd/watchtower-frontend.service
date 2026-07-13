@@ -5,7 +5,7 @@ After=network.target watchtower-api.service
 [Service]
 Type=simple
 User=watchtower
-WorkingDirectory=/opt/recon-ecosystem/watchtower-frontend
+WorkingDirectory=/opt/Recon-ecosystem/watchtower-frontend
 
 # Loads VITE_API_URL, VITE_API_TOKEN, etc. — used at BUILD time by Vite,
 # but harmless to also load here for the runtime Node server.

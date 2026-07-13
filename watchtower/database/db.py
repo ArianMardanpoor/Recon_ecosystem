@@ -18,16 +18,24 @@ def current_time():
 # ==========================================
 # Database Connection Setup & Validation
 # ==========================================
-MONGO_URI = os.getenv("MONGO_URI")
+from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 
-# 1. بررسی وجود متغیر محیطی
-if not MONGO_URI or not MONGO_URI.strip():
-    raise RuntimeError("CRITICAL: MONGO_URI is not set or is empty. Please set it in your environment variables.")
+# کدهای بررسی فرمت تو که بالاتر بود...
 
-# 2. بررسی ساختار connection string
-if not (MONGO_URI.startswith("mongodb+srv://") or MONGO_URI.startswith("mongodb://")):
-    raise RuntimeError("CRITICAL: Invalid MONGO_URI format. Connection string must start with 'mongodb+srv://' or 'mongodb://'.")
-
+try:
+    # اضافه کردن تایم‌اوت ۳ ثانیه‌ای برای انتخاب سرور
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
+    
+    # یک پینگ صوری به دیتابیس بزن تا مجبور بشه همین الان اتصال رو تست کنه
+    client.admin.command('ping')
+    print("[+] MongoDB connected successfully!")
+    
+except ServerSelectionTimeoutError as e:
+    import sys
+    print(f"[!] CRITICAL: MongoDB is down or unreachable! Details: {e}", file=sys.stderr)
+    sys.exit(1)
+    
 connect_kwargs = {
     "db": "watchtower",
     "host": MONGO_URI,

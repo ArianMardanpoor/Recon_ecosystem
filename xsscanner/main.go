@@ -38,7 +38,7 @@ const (
 
 var (
 	apiURL          = "http://localhost:3131/api/http"
-	apiToken        = string
+	apiToken        = ""
 	oldTargetsFile  = "all_scanned_targets.txt"
 	globalOutputDir = "./results"
 )
