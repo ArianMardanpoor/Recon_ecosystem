@@ -255,16 +255,24 @@ func countLinesInDir(dir string) int {
 }
 
 // runIngest runs the python database ingestion script per target
-// runIngest runs the python database ingestion script per target
 func runIngest(hostname string) {
 	// 1. تنظیم مسیر پایتون با بررسی وجود فایل (os.Stat)
 	pythonPath := os.Getenv("WATCHTOWER_PYTHON")
 	if pythonPath == "" {
-		pythonPath = "/opt/Recon_ecosystem/watchtower/venv/bin/python3" // مسیر پیش‌فرض اولیه
-	}
-
-	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
-		pythonPath = "python3" // Fallback به پایتون سیستم در صورت عدم وجود مسیر بالا
+		// جستجو در مسیرهای احتمالی به ترتیب اولویت (مناسب برای کانتینر و لوکال)
+		if _, err := os.Stat("/app/watchtower/venv/bin/python3"); err == nil {
+			pythonPath = "/app/watchtower/venv/bin/python3"
+		} else if _, err := os.Stat("./venv/bin/python3"); err == nil {
+			pythonPath = "./venv/bin/python3"
+		} else if _, err := os.Stat("../watchtower/venv/bin/python3"); err == nil {
+			pythonPath = "../watchtower/venv/bin/python3"
+		} else if _, err := os.Stat("/opt/Recon_ecosystem/watchtower/venv/bin/python3"); err == nil {
+			pythonPath = "/opt/Recon_ecosystem/watchtower/venv/bin/python3"
+		} else {
+			pythonPath = "python3" // Fallback نهایی به پایتون سیستم
+		}
+	} else if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+		pythonPath = "python3" // Fallback در صورت نامعتبر بودن مسیر داخل متغیر محیطی
 	}
 
 	// 2. پیدا کردن Root دایرکتوری Watchtower
