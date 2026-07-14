@@ -52,3 +52,12 @@ export const api = {
   // Assets
   getAssets: (params: Record<string, any>) => apiClient.get('/assets', { params }),
 };
+export async function downloadExport(
+  path: string,
+  params: Record<string, any> = {}
+) {
+  return apiClient.get(path, {
+    params,
+    responseType: 'blob',
+  });
+}
