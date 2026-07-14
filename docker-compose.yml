@@ -37,7 +37,7 @@ services:
     networks:
       - watchtower-net
     volumes:
-      - recon-results:/app/xsscanner/results
+      - recon-results:/xsscanner/results
     profiles:
       - manual
 
