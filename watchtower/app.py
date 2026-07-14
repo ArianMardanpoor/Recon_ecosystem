@@ -7,7 +7,6 @@ import os
 import re
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
-from functools import wraps
 import signal
 import sys
 from mongoengine.queryset.visitor import Q
@@ -16,28 +15,11 @@ from database.db import (
     current_time
 )
 
-API_TOKEN = os.getenv("WATCHTOWER_API_TOKEN")
-
-# Fail fast at startup if token is missing
-if not API_TOKEN:
-    print("[!] CRITICAL ERROR: WATCHTOWER_API_TOKEN environment variable is not set.", file=sys.stderr)
-    sys.exit(1)
-
 app = Flask(__name__)
 
 # ==========================================
-# Auth & Helpers
+# Helpers
 # ==========================================
-
-def require_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('X-API-Token')
-        if not token or token != API_TOKEN:
-            return jsonify({'error': 'Unauthorized'}), 401
-        return f(*args, **kwargs)
-    return decorated
-
 
 def validate_domain(domain: str) -> bool:
     if not domain or len(domain) > 253:
@@ -179,7 +161,6 @@ def health():
 # ==========================================
 
 @app.route('/api/programs', methods=['GET'])
-@require_auth
 def get_programs():
     """
     List programs with filters.
@@ -198,7 +179,6 @@ def get_programs():
 
 
 @app.route('/api/programs/<program_name>', methods=['GET'])
-@require_auth
 def get_program(program_name):
     """Specific program details with statistics"""
     program = Programs.objects(program_name=program_name).first()
@@ -220,7 +200,6 @@ def get_program(program_name):
 # ==========================================
 
 @app.route('/api/subdomains', methods=['GET'])
-@require_auth
 def get_subdomains():
     """
     Get subdomains with advanced filtering.
@@ -331,7 +310,6 @@ def get_subdomains():
 # ==========================================
 
 @app.route('/api/lives', methods=['GET'])
-@require_auth
 def get_lives():
     """
     Get live subdomains with advanced filtering.
@@ -409,7 +387,6 @@ def get_lives():
 # ==========================================
 
 @app.route('/api/http', methods=['GET'])
-@require_auth
 def get_http():
     """
     Get HTTP services with advanced filtering.
@@ -641,7 +618,6 @@ def get_http():
 
 
 @app.route('/api/http/<subdomain>', methods=['GET'])
-@require_auth
 def get_http_detail(subdomain):
     """Full details of an HTTP service including findings array and context"""
     h = Http.objects(subdomain=subdomain).first()
@@ -659,7 +635,6 @@ def get_http_detail(subdomain):
 # ==========================================
 
 @app.route('/api/tested', methods=['POST'])
-@require_auth
 def set_tested_status():
     """
     Toggle 'tested' status across all related collections.
@@ -694,7 +669,6 @@ def set_tested_status():
 # ==========================================
 
 @app.route('/api/assets', methods=['GET'])
-@require_auth
 def get_assets():
     """
     Combined view: Subdomain + Live + HTTP data in one payload.
@@ -781,7 +755,6 @@ def get_assets():
 # ==========================================
 
 @app.route('/api/stats', methods=['GET'])
-@require_auth
 def global_stats():
     """Global system statistics overview"""
     return jsonify({
@@ -800,7 +773,6 @@ def global_stats():
 
 
 @app.route('/api/stats/program/<program_name>', methods=['GET'])
-@require_auth
 def program_stats(program_name):
     """Detailed statistics for a specific program"""
     program = Programs.objects(program_name=program_name).first()
@@ -865,7 +837,6 @@ def program_stats(program_name):
 
 
 @app.route('/api/stats/timeline', methods=['GET'])
-@require_auth
 def timeline_stats():
     """
     Daily asset discovery statistics for the last N days.
@@ -897,7 +868,6 @@ def timeline_stats():
 
 
 @app.route('/api/meta/scan-stats', methods=['GET'])
-@require_auth
 def get_scan_stats():
     """
     Scan status and findings statistics overview.
@@ -923,7 +893,6 @@ def get_scan_stats():
 # ==========================================
 
 @app.route('/api/meta/providers', methods=['GET'])
-@require_auth
 def get_providers():
     """List of all known providers"""
     program = request.args.get('program', '').strip()
@@ -937,7 +906,6 @@ def get_providers():
 
 
 @app.route('/api/meta/techs', methods=['GET'])
-@require_auth
 def get_techs():
     """List of all identified technologies (ranked)"""
     program = request.args.get('program', '').strip()
@@ -953,7 +921,6 @@ def get_techs():
 
 
 @app.route('/api/meta/cdns', methods=['GET'])
-@require_auth
 def get_cdns():
     """List of identified CDNs (ranked)"""
     program = request.args.get('program', '').strip()
@@ -968,7 +935,6 @@ def get_cdns():
 
 
 @app.route('/api/meta/scopes', methods=['GET'])
-@require_auth
 def get_scopes():
     """List of scopes"""
     program = request.args.get('program', '').strip()
@@ -982,7 +948,6 @@ def get_scopes():
 
 
 @app.route('/api/meta/ips', methods=['GET'])
-@require_auth
 def get_ips():
     """List of unique IP addresses"""
     program = request.args.get('program', '').strip()
@@ -1000,7 +965,6 @@ def get_ips():
 # ==========================================
 
 @app.route('/api/search', methods=['GET'])
-@require_auth
 def global_search():
     """
     Cross-collection global search.
@@ -1042,7 +1006,6 @@ def global_search():
 # ==========================================
 
 @app.route('/api/export/subdomains', methods=['GET'])
-@require_auth
 def export_subdomains():
     """
     Export plain text subdomains (1 per line).
@@ -1075,7 +1038,6 @@ def export_subdomains():
 
 
 @app.route('/api/export/urls', methods=['GET'])
-@require_auth
 def export_urls():
     """Export plain text URLs directly for HTTP vulnerability scanners"""
     q = Http.objects()
@@ -1095,7 +1057,6 @@ def export_urls():
 
 
 @app.route('/api/export/lives', methods=['GET'])
-@require_auth
 def export_lives():
     """Export plain text live subdomains (1 per line)"""
     q = LiveSubdomains.objects()
@@ -1121,7 +1082,6 @@ def export_lives():
 
 
 @app.route('/api/export/lives/ips', methods=['GET'])
-@require_auth
 def export_lives_ips():
     """Export plain text list of all unique IP addresses mapped to live assets"""
     q = LiveSubdomains.objects()
@@ -1154,7 +1114,6 @@ def export_lives_ips():
 
 
 @app.route('/api/export/findings', methods=['GET'])
-@require_auth
 def export_findings():
     """
     Export all findings flattened into a JSON payload.
@@ -1229,4 +1188,5 @@ if __name__ == '__main__':
     # Flask dev server is strictly for local debugging. 
     # In production, run this app using Gunicorn:
     # gunicorn -w 4 -b 127.0.0.1:3131 --timeout 120 app:app
-    app.run(host='127.0.0.1', port=3131, debug=False)
+    app.run(host='0.0.0.0', port=3131, debug=False)
+    

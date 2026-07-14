@@ -1,0 +1,54 @@
+FROM golang:1.24-bookworm
+
+# نصب وابستگی‌های پایه سیستم و پایتون
+RUN apt-get update && \
+    apt-get install -y python3 python3-venv python3-pip git curl unzip libpcap-dev cargo jq && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# نصب ابزارهای Go
+RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
+    go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \
+    go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && \
+    go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
+    go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
+    go install -v github.com/lc/gau/v2/cmd/gau@latest && \
+    go install -v github.com/tomnomnom/waybackurls@latest && \
+    go install -v github.com/ImAyrix/fallparams@latest
+
+# نصب Amass (نسخه باینری)
+RUN curl -sSL "https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_amd64.zip" -o amass.zip && \
+    unzip -j amass.zip "amass_Linux_amd64/amass" -d /usr/local/bin/ && \
+    rm amass.zip && chmod +x /usr/local/bin/amass
+
+# نصب x8 از طریق Cargo (برای اطمینان از سازگاری کامل)
+RUN git clone --depth 1 https://github.com/sh1yo/x8 /tmp/x8 && \
+    cd /tmp/x8 && cargo build --release && cp target/release/x8 /usr/local/bin/ && \
+    rm -rf /tmp/x8
+
+ENV PATH="$PATH:/go/bin"
+
+# کپی و بیلد xsscanner
+COPY xsscanner /app/xsscanner
+WORKDIR /app/xsscanner
+RUN if [ -f "build.sh" ]; then bash build.sh; else \
+    go build -o nice_passive nice_passive.go && \
+    go build -o nice_katana nice_katana.go && \
+    go build -o nice_params nice_params.go && \
+    go build -o x9 x9.go && \
+    go build -o xssniper xssniper.go && \
+    go build -o xsscanner main.go && \
+    go build -o dom_sink_checker dom_sink_checker.go; fi
+
+ENV PATH="$PATH:/app/xsscanner"
+
+# آماده‌سازی watchtower و محیط پایتون
+COPY watchtower /app/watchtower
+WORKDIR /app/watchtower
+RUN python3 -m venv venv && \
+    venv/bin/pip install --no-cache-dir --upgrade pip && \
+    venv/bin/pip install --no-cache-dir -r requirements.txt
+
+WORKDIR /app
+CMD ["tail", "-f", "/dev/null"]

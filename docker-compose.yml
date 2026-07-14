@@ -1,0 +1,37 @@
+services:
+  watchtower-api:
+    build:
+      context: ./watchtower
+      dockerfile: Dockerfile
+    container_name: watchtower-api
+    ports:
+      - "3131:3131"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - watchtower-net
+
+  recon-tools:
+    build:
+      context: ./xsscanner
+      dockerfile: Dockerfile
+    container_name: recon-tools
+    env_file:
+      - .env
+    depends_on:
+      - watchtower-api
+    networks:
+      - watchtower-net
+    volumes:
+      - recon-results:/app/xsscanner/results
+    # این سرویس دائم روشن نمی‌مونه؛ با docker compose run اجرا می‌شه
+    profiles:
+      - manual
+
+networks:
+  watchtower-net:
+    driver: bridge
+
+volumes:
+  recon-results:

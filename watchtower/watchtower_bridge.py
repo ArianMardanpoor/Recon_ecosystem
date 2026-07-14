@@ -5,14 +5,14 @@ import json
 import sys
 import re
 import time
+from dotenv import load_dotenv
 
+# لود کردن متغیرهای محیطی از فایل .env
+load_dotenv()
 
-BASE_API_URL = "http://YOUR_WATCHTOWER_API/" 
-API_TOKEN = os.environ.get("WATCHTOWER_API_TOKEN")
+# خواندن متغیرها از environment
+WATCHTOWER_API_URL = os.getenv("WATCHTOWER_API_URL", "http://127.0.0.1:3131/api")
 
-if not API_TOKEN:
-    print("\033[31m[BRIDGE] CRITICAL ERROR: WATCHTOWER_API_TOKEN environment variable is not set!\033[0m")
-    sys.exit(1)                 # توکن پیش‌فرض در app.py
 OLD_TARGETS_FILE = "all_scanned_targets.txt"    # فایل تاریخچه برای anew
 OUTPUT_DIR = "./watchtower_scans"               # محل ذخیره لاگ‌های اسکن
 XSSNIPER_CMD = "go run xssniper_v2.go -w 5"        # دستور اجرای اسکنر
@@ -22,13 +22,10 @@ def log(msg, color="\033[36m"):
     print(f"\033[90m[{ts}]\033[0m {color}[BRIDGE] {msg}\033[0m")
 
 def get_data_from_api():
-    """دریافت داده‌ها از API واچ‌تاور با مدیریت احراز هویت و صفحه‌بندی"""
-    endpoint = f"{BASE_API_URL}/http"
+    """دریافت داده‌ها از API واچ‌تاور با مدیریت صفحه‌بندی (بدون نیاز به احراز هویت)"""
+    # استفاده از URL داینامیک خوانده شده از .env
+    endpoint = f"{WATCHTOWER_API_URL}/http"
     log(f"Connecting to API: {endpoint}...")
-    
-    headers = {
-        'X-API-Token': API_TOKEN  # استفاده از متغیر سراسری به جای مقدار هاردکد
-    }
     
     all_urls = []
     page = 1
@@ -43,7 +40,8 @@ def get_data_from_api():
                 # 'only_new': 'true' # اختیاری: اگر فقط موارد ۲۴ ساعت اخیر را می‌خواهید
             }
             
-            response = requests.get(endpoint, headers=headers, params=params, timeout=60)
+            # هدرهای احراز هویت حذف شدند
+            response = requests.get(endpoint, params=params, timeout=60)
             response.raise_for_status()
             result = response.json()
             

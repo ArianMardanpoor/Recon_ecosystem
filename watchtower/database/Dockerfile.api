@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+WORKDIR /app/watchtower
+
+# نصب وابستگی‌ها
+COPY watchtower/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# کپی کل سورس (با توجه به این که context روت پروژه است)
+COPY watchtower /app/watchtower/
+
+EXPOSE 3131
+
+# اجرای ساده (بدون Gunicorn)
+CMD ["python", "app.py"]

@@ -263,17 +263,8 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": {
           target: env.VITE_API_URL || "http://localhost:3131",
-
           changeOrigin: true,
-
           rewrite: (p) => p.replace(/^\/api/, "/api"),
-
-          headers: env.VITE_API_TOKEN
-            ? {
-                "X-API-Token": env.VITE_API_TOKEN,
-              }
-            : {},
-
           timeout: 30000,
         },
       },

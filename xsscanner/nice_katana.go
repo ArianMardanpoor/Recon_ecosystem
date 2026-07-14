@@ -99,8 +99,8 @@ func runNiceKatanaBatch(targets []string, outDir string, verbose bool) {
 	katanaOutput := filepath.Join(outDir, "katana_batch_output.txt")
 
 	// اصلاح رشته فیلتر (ml و ip به xml و zip تغییر کردند)
+// رفع باگ اکستنشن‌های کراپت شده
 	extFilter := "json,js,fnt,ogg,css,jpg,jpeg,png,svg,img,gif,exe,mp4,flv,pdf,doc,ogv,webm,wmv,webp,mov,mp3,m4a,m4p,ppt,pptx,scss,tif,tiff,ttf,otf,woff,woff2,bmp,ico,eot,htc,swf,rtf,image,rf,txt,xml,zip"
-
 	gray := "\033[1;30m"
 	yellow := "\033[1;33m"
 	reset := "\033[0m"

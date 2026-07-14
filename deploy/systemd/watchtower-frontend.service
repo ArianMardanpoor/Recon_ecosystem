@@ -1,23 +1,26 @@
 [Unit]
-Description=Watchtower Frontend (built static + node server)
+Description=Watchtower Frontend (Node server - Local development/always-on)
 After=network.target watchtower-api.service
+
+# ==============================================================================
+# مهم: این سرویس فقط مخصوص نصب روی ماشین شخصی/لوکال (همیشه روشن) است.
+# روی VPS ساعتی/موقت نیازی به راه‌اندازی و اجرای این سرویس نیست.
+# ==============================================================================
 
 [Service]
 Type=simple
-User=watchtower
-WorkingDirectory=/opt/Recon-ecosystem/watchtower-frontend
+# نام کاربری لوکال خود را جایگزین <user> کنید
+User=arian
+WorkingDirectory=/home/arian/Recon_ecosystem/watchtower-frontend
 
-# Loads VITE_API_URL, VITE_API_TOKEN, etc. — used at BUILD time by Vite,
-# but harmless to also load here for the runtime Node server.
-EnvironmentFile=/opt/recon-ecosystem/watchtower-frontend/.env
+# بارگذاری متغیرهای محیطی فرانت‌اند
+EnvironmentFile=/home/arian/Recon_ecosystem/watchtower-frontend/.env
 
 Environment=NODE_ENV=production
 Environment=PORT=3000
 
-# Run `pnpm build` once manually (or via a deploy script) before enabling
-# this service — it serves the already-built dist/ output, it does not
-# rebuild on start.
-ExecStart=/usr/bin/node /opt/recon-ecosystem/watchtower-frontend/dist/index.js
+# اجرای سرور Node.js از روی بیلد فرانت‌اند
+ExecStart=/usr/bin/node /home/arian/Recon_ecosystem/watchtower-frontend/dist/index.js
 
 Restart=on-failure
 RestartSec=5
@@ -25,8 +28,9 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 
-StandardOutput=append:/var/log/watchtower/frontend.log
-StandardError=append:/var/log/watchtower/frontend.error.log
+# ارسال لاگ‌ها به journald
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

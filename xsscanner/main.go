@@ -38,16 +38,15 @@ const (
 
 var (
 	apiURL          = "http://localhost:3131/api/http"
-	apiToken        = ""
 	oldTargetsFile  = "all_scanned_targets.txt"
 	globalOutputDir = "./results"
 )
 
 func init() {
-	apiToken = os.Getenv("WATCHTOWER_API_TOKEN")
-	if apiToken == "" {
-		fmt.Println("\033[31m[CRITICAL] WATCHTOWER_API_TOKEN environment variable is not set!\033[0m")
-		os.Exit(1)
+	// خواندن URL بک‌اند از متغیر محیطی شبکه داکر و افزودن /http
+	if v := os.Getenv("WATCHTOWER_API_URL"); v != "" {
+		// برای جلوگیری از خطای اسلش اضافی، اسلش‌های انتهای متغیر را حذف می‌کنیم
+		apiURL = strings.TrimRight(v, "/") + "/http"
 	}
 }
 
@@ -143,7 +142,6 @@ func fetchDataFromAPI(mode string) []string {
 		}
 
 		req, _ := http.NewRequest("GET", urlStr, nil)
-		req.Header.Set("X-API-Token", apiToken)
 		req.Header.Set("Accept", "application/json")
 
 		client := &http.Client{Timeout: 60 * time.Second}
@@ -257,61 +255,45 @@ func countLinesInDir(dir string) int {
 }
 
 // runIngest runs the python database ingestion script per target
+// runIngest runs the python database ingestion script per target
 func runIngest(hostname string) {
-	repoRoot := ".."
-	exePath, err := os.Executable()
-	if err == nil {
-		dir := filepath.Dir(exePath)
-		if _, err := os.Stat(filepath.Join(dir, "../watchtower")); err == nil {
-			repoRoot = filepath.Join(dir, "..")
-		} else if _, err := os.Stat(filepath.Join(dir, "watchtower")); err == nil {
-			repoRoot = dir
-		}
-	}
-	if _, err := os.Stat(filepath.Join(repoRoot, "watchtower")); err != nil {
-		if _, err := os.Stat("watchtower"); err == nil {
-			repoRoot = "."
-		}
+	// 1. تنظیم مسیر پایتون با بررسی وجود فایل (os.Stat)
+	pythonPath := os.Getenv("WATCHTOWER_PYTHON")
+	if pythonPath == "" {
+		pythonPath = "/opt/Recon_ecosystem/watchtower/venv/bin/python3" // مسیر پیش‌فرض اولیه
 	}
 
-	pythonPath := "/opt/Recon_ecosystem/watchtower/venv/bin/python3"
-	if _, err := os.Stat(pythonPath); err != nil {
-		fmt.Fprintf(os.Stderr, "%s[WARNING] watchtower venv python3 not found at %s. Falling back to global python3.%s\n", M_red, pythonPath, M_reset)
-		pythonPath = "python3"
+	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
+		pythonPath = "python3" // Fallback به پایتون سیستم در صورت عدم وجود مسیر بالا
 	}
 
-	scriptPath := filepath.Join(repoRoot, "watchtower", "database", "ingest_results.py")
-
-	// Read watchtower/.env specifically to resolve MONGO_URI
-	envMap := make(map[string]string)
-	watchtowerEnvPath := filepath.Join(repoRoot, "watchtower", ".env")
-	if f, err := os.Open(watchtowerEnvPath); err == nil {
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				val := strings.TrimSpace(parts[1])
-				val = strings.Trim(val, `"'`)
-				envMap[key] = val
-			}
+	// 2. پیدا کردن Root دایرکتوری Watchtower
+	repoRoot := os.Getenv("WATCHTOWER_REPO_ROOT")
+	if repoRoot == "" {
+		// جستجو در مسیرهای احتمالی به ترتیب اولویت (مناسب برای کانتینر و لوکال)
+		if _, err := os.Stat("/app/watchtower"); err == nil {
+			repoRoot = "/app/watchtower"
+		} else if _, err := os.Stat("../watchtower"); err == nil {
+			repoRoot = "../watchtower"
+		} else if _, err := os.Stat("./watchtower"); err == nil {
+			repoRoot = "./watchtower"
+		} else {
+			repoRoot = "." // Fallback نهایی
 		}
 	}
 
-	// Construct environment for the subprocess (Go Process Env + watchtower/.env)
-	cmdEnv := os.Environ()
-	for k, v := range envMap {
-		cmdEnv = append(cmdEnv, fmt.Sprintf("%s=%s", k, v))
+	// 3. تنظیم مسیر اسکریپت بر اساس repoRoot
+	scriptPath := os.Getenv("WATCHTOWER_INGEST_SCRIPT")
+	if scriptPath == "" {
+		scriptPath = filepath.Join(repoRoot, "database", "ingest_results.py")
 	}
 
 	logMsg(fmt.Sprintf("Running database ingestion for %s...", hostname), M_cyan)
+	logMsg(fmt.Sprintf("Using Python: %s | Script: %s", pythonPath, scriptPath), M_gray)
+
+	// اجرای اسکریپت پایتون
 	cmd := exec.Command(pythonPath, scriptPath, hostname, "--workdir", globalOutputDir)
-	cmd.Env = cmdEnv
+	cmd.Env = os.Environ()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf

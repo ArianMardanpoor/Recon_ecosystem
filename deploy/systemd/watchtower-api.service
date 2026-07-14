@@ -1,31 +1,33 @@
 [Unit]
-Description=Watchtower API (Flask backend via Gunicorn)
+Description=Watchtower API (Flask backend - Local development/always-on)
 After=network.target
+
+# ==============================================================================
+# مهم: این سرویس فقط مخصوص نصب روی ماشین شخصی/لوکال (همیشه روشن) است.
+# روی VPS ساعتی/موقت نیازی به راه‌اندازی و اجرای این سرویس نیست.
+# ==============================================================================
 
 [Service]
 Type=simple
-# EDIT these two paths to match your actual deployment location and user
-User=watchtower
-WorkingDirectory=/opt/Recon-ecosystem/watchtower
+# نام کاربری لوکال خود را جایگزین <user> کنید
+User=arian
+WorkingDirectory=/home/arian/Recon_ecosystem/watchtower
 
-# Loads MONGO_URI, WATCHTOWER_API_TOKEN, TELEGRAM_*, etc.
-EnvironmentFile=/opt/recon-ecosystem/watchtower/.env
+# بارگذاری متغیرهای محیطی لوکال (مثل MONGO_URI و WATCHTOWER_API_TOKEN)
+EnvironmentFile=/home/arian/Recon_ecosystem/watchtower/.env
 
-ExecStart=/opt/recon-ecosystem/watchtower/venv/bin/gunicorn \
-    -w 4 \
-    -b 127.0.0.1:3131 \
-    --timeout 120 \
-    app:app
+# اجرای مستقیم برای مشاهده لاگ‌ها در حالت Dev/عادی بدون پیچیدگی‌های Gunicorn
+ExecStart=/home/arian/Recon_ecosystem/watchtower/venv/bin/python app.py
 
 Restart=on-failure
 RestartSec=5
 
-# Basic hardening (relax if it breaks something you need)
 NoNewPrivileges=true
 PrivateTmp=true
 
-StandardOutput=append:/var/log/watchtower/api.log
-StandardError=append:/var/log/watchtower/api.error.log
+# ارسال لاگ‌ها به journald (برای بررسی ساده‌تر با journalctl)
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
