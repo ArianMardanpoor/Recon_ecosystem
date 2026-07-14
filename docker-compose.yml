@@ -2,7 +2,7 @@ services:
   watchtower-api:
     build:
       context: ./watchtower
-      dockerfile: Dockerfile
+      dockerfile: database/Dockerfile.api
     container_name: watchtower-api
     command: python3 app.py
     ports:
@@ -12,11 +12,23 @@ services:
     restart: unless-stopped
     networks:
       - watchtower-net
+    depends_on:
+      - mongodb
+
+  mongodb:
+    image: mongo:7
+    container_name: watchtower-mongodb
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - watchtower-net
+
 
   recon-tools:
     build:
-      context: ./xsscanner
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: xsscanner/Dockerfile
     container_name: recon-tools
     env_file:
       - .env
@@ -29,9 +41,12 @@ services:
     profiles:
       - manual
 
+
 networks:
   watchtower-net:
     driver: bridge
 
+
 volumes:
   recon-results:
+  mongo-data:
