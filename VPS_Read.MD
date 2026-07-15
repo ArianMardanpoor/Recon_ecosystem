@@ -1,4 +1,5 @@
 # requirements
+```
 sudo apt update
 sudo apt install -y ca-certificates curl gnupg
 sudo apt install git
@@ -11,31 +12,40 @@ echo \
   sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 sudo apt update
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
+```
 # clone repository
+```
 git clone https://github.com/ArianMardanpoor/Recon_ecosystem.git
-
+```
 # config .env
+```
 cp .env.example .env
 vim .env
+```
 
 # build the project and api
+```
 docker compose up -d --build watchtower-api
 docker compose logs -f watchtower-api
-
+```
 # full scan command
+```
 docker compose run --rm recon-tools bash -c \
   "/xsscanner/xsscanner"
-
+```
 # fresh scan command
+```
 docker compose run --rm recon-tools bash -c \
   "/xsscanner/xsscanner -mode fresh"
+```
 
 # watch cammand 
+```
 docker compose run --rm recon-tools bash -c \
   "/watchtower/watch.sh"
-
+```
 # finishing ...
+```
 docker compose down -v
-
+```
 
