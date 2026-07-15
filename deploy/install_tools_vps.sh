@@ -62,7 +62,15 @@ check "projectdiscovery/go tools"
 
 pip3 install uro --break-system-packages
 check "uro"
+# ... after your go build commands ...
 
+# Verify param.txt exists
+if [ ! -f "xsscanner/param.txt" ]; then
+    echo "[ERROR] xsscanner/param.txt not found!"
+    exit 1
+else
+    echo "[SUCCESS] param.txt verified."
+fi
 step "[3/7] amass (prebuilt binary)"
 AMASS_VER="v4.2.0"
 curl -sSL "https://github.com/owasp-amass/amass/releases/download/${AMASS_VER}/amass_Linux_amd64.zip" -o /tmp/amass.zip \

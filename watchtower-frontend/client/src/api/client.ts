@@ -19,15 +19,24 @@ export const apiClient = axios.create({
 apiClient.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    let errorMessage = 'An unknown error occurred';
+
     if (error.response) {
-      const message = error.response.data?.message || error.response.statusText;
-      console.error(`API Error (${error.response.status}):`, message);
+      // The request was made and the server responded with a status code outside the 2xx range
+      errorMessage = error.response.data?.message || error.response.statusText;
+      console.error(`API Error (${error.response.status}):`, errorMessage);
     } else if (error.request) {
-      console.error('API Error: No response from server');
+      // The request was made but no response was received (CORS or Network Failure)
+      errorMessage = 'Network Error: No response from server. This may be a CORS issue or the backend is down.';
+      console.error(errorMessage);
     } else {
-      console.error('API Error:', error.message);
+      // Something happened in setting up the request
+      errorMessage = error.message;
+      console.error('API Error:', errorMessage);
     }
-    return Promise.reject(error);
+    
+    // Rethrow with a clear Error object so the UI can catch and display it
+    return Promise.reject(new Error(errorMessage));
   }
 );
 
@@ -52,6 +61,7 @@ export const api = {
   // Assets
   getAssets: (params: Record<string, any>) => apiClient.get('/assets', { params }),
 };
+
 export async function downloadExport(
   path: string,
   params: Record<string, any> = {}

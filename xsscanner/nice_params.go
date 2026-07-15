@@ -438,7 +438,7 @@ func runX8(ctx context.Context, rawURL, wordlist string, silent bool) ([]string,
 		"-u", rawURL,
 		"-w", wordlist,
 		"-o", tmpFile,
-		"-c", "5",        // کانکارنسی ۵ بسیار عالی و چراغ‌خاموش است
+		"-c", "5", // کانکارنسی ۵ بسیار عالی و چراغ‌خاموش است
 		"--delay", "1000", // اصلاح شد: ۱۰۰۰ میلی‌ثانیه معادل ۱ ثانیه تاخیر واقعی
 		"--timeout", "15",
 		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -706,18 +706,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Replace the existing logic inside main() under "if cfg.Wordlist == """ with:
+
 	if cfg.Wordlist == "" {
-		// ابتدا بررسی دایرکتوری محل قرارگیری خود فایل اجرایی (بهینه برای فایل کامپایل‌شده)
-		exePath, err := os.Executable()
-		if err == nil {
-			target := filepath.Join(filepath.Dir(exePath), "param.txt")
-			if _, err := os.Stat(target); err == nil {
-				cfg.Wordlist = target
+		// 1. Check Environment Variable
+		if envPath := os.Getenv("X8_WORDLIST_PATH"); envPath != "" {
+			cfg.Wordlist = envPath
+			fmt.Fprintf(os.Stderr, "[DEBUG] Using wordlist from env: %s\n", cfg.Wordlist)
+		}
+
+		// 2. Fallback to exe-relative
+		if cfg.Wordlist == "" {
+			exePath, err := os.Executable()
+			if err == nil {
+				target := filepath.Join(filepath.Dir(exePath), "param.txt")
+				if _, err := os.Stat(target); err == nil {
+					cfg.Wordlist = target
+					fmt.Fprintf(os.Stderr, "[DEBUG] Using wordlist relative to binary: %s\n", cfg.Wordlist)
+				}
 			}
 		}
-		// اگر در مسیر بالا پیدا نشد (مثلا موقع کار با go run)، مستقیماً در دایرکتوری فعلی ترمینال دنبالش می‌گردد
+
+		// 3. Fallback to CWD
 		if cfg.Wordlist == "" {
 			cfg.Wordlist = "param.txt"
+			fmt.Fprintf(os.Stderr, "[DEBUG] Falling back to CWD: %s\n", cfg.Wordlist)
 		}
 	}
 

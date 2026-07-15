@@ -1,11 +1,7 @@
-#!/usr/bin/env python3
-"""
-Watchtower API - Full-Featured Recon Dashboard Backend
-Supports rich multi-field filtering across all asset types
-"""
 import os
 import re
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # <-- Add this import
 from datetime import datetime, timedelta
 import signal
 import sys
@@ -17,6 +13,12 @@ from database.db import (
 
 app = Flask(__name__)
 
+# ==========================================
+# CORS Configuration
+# ==========================================
+# Allow frontend origins via env var, default to permissive '*' 
+allowed_origins = os.environ.get('FRONTEND_ORIGIN', os.environ.get('ALLOW_ALL_ORIGINS', '*'))
+CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
 # ==========================================
 # Helpers
 # ==========================================

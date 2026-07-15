@@ -79,6 +79,9 @@ COPY --from=builder \
 # کپی مستقیم پوشه watchtower به روت
 COPY watchtower /watchtower
 
+# کپی فایل param.txt به مسیر اجرایی در کانتینر
+COPY xsscanner/param.txt /xsscanner/param.txt
+
 # ساخت محیط مجازی و نصب پیش‌نیازها در مسیر جدید
 RUN python3 -m venv /watchtower/venv && \
     /watchtower/venv/bin/pip install --no-cache-dir \
@@ -90,5 +93,6 @@ WORKDIR /xsscanner
 # آپدیت متغیرهای محیطی
 ENV WATCHTOWER_PYTHON=/watchtower/venv/bin/python3
 ENV WATCHTOWER_API_URL=http://watchtower-api:3131/api
+ENV X8_WORDLIST_PATH=/xsscanner/param.txt
 
 CMD ["./xsscanner"]
