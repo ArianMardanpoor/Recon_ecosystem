@@ -3,6 +3,7 @@ services:
     build:
       context: ./watchtower
       dockerfile: database/Dockerfile.api
+      network: host 
     container_name: watchtower-api
     command: python3 app.py
     ports:
@@ -24,11 +25,11 @@ services:
     networks:
       - watchtower-net
 
-
   recon-tools:
     build:
       context: .
       dockerfile: xsscanner/Dockerfile
+      network: host # <--- اجبار BuildKit به استفاده از اینترنت هاست برای نصب ابزارهای اسکنر
     container_name: recon-tools
     env_file:
       - .env
@@ -41,11 +42,9 @@ services:
     profiles:
       - manual
 
-
 networks:
   watchtower-net:
     driver: bridge
-
 
 volumes:
   recon-results:

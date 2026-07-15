@@ -2,7 +2,7 @@
 ```
 sudo apt update
 sudo apt install -y ca-certificates curl gnupg
-sudo apt install git
+sudo apt install -y git
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 sudo chmod a+r /etc/apt/keyrings/docker.gpg
@@ -15,10 +15,12 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin d
 ```
 # clone repository
 ```
+cd /opt
 git clone https://github.com/ArianMardanpoor/Recon_ecosystem.git
 ```
 # config .env
 ```
+cd Recon_ecosystem/
 cp .env.example .env
 vim .env
 ```

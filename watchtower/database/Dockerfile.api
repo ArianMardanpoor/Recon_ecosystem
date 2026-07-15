@@ -1,11 +1,17 @@
 FROM python:3.11-slim
 
+# غیرفعال کردن بافر پایتون برای نمایش بلادرنگ لاگ‌های اسکن در داکر
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# مسیر کاری دقیقاً مطابق با ساختار شما
 WORKDIR /app/watchtower
 
+# کپیrequirements از ریشه پوشه watchtower
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
+# کپی کل محتویات پوشه watchtower به درون کانتینر
 COPY . .
 
 EXPOSE 3131
