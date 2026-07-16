@@ -1,7 +1,0 @@
-# این فایل را به docker-compose.override.yml تغییر نام دهید.
-# کاربرد: اگر نمی‌خواهید recon-tools دائم روشن بماند و فقط می‌خواهید با
-# docker compose run --rm recon-tools یک اسکن بزنید و بعد ترمینات کنید.
-services:
-  recon-tools:
-    command: ["bash", "-c", "/app/watchtower/watch.sh && /app/xsscanner/xsscanner -phase 4"]
-    restart: "no"

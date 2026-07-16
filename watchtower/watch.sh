@@ -38,7 +38,7 @@ if ! grep -qE '^MONGO_URI=.+' "$ENV_FILE"; then
 fi
 echo "[+] Environment variables loaded."
 
-# ایجاد دایرکتوری لاگ‌گیری در صورت عدم وجود
+# ایجاد دایرکتوری لاگ‌گیری اصلی در صورت عدم وجود
 LOG_DIR="$BASE_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -46,6 +46,9 @@ mkdir -p "$LOG_DIR"
 run_module() {
     local script_name=$1
     local log_file="$LOG_DIR/${script_name%.py}.log"
+    
+    # اصلاحیه: ایجاد خودکار دایرکتوری‌های فرعی لاگ (مثل logs/programs یا logs/enum)
+    mkdir -p "$(dirname "$log_file")"
     
     echo "---------------------------------------------------"
     echo "[*] Running $script_name..."
@@ -61,7 +64,7 @@ run_module() {
 }
 
 # اجرای زنجیره‌ای ماژول‌ها به ترتیب
-run_module "program/watch_sync_program.py"
+run_module "programs/watch_sync_program.py"
 run_module "enum/watch_enum_all.py"
 run_module "ns/watch_ns_all.py"
 run_module "http/watch_http_all.py"
