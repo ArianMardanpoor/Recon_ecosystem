@@ -61,10 +61,10 @@ run_module() {
 }
 
 # اجرای زنجیره‌ای ماژول‌ها به ترتیب
-run_module "watch_sync_program.py"
-run_module "watch_enum_all.py"
-run_module "watch_ns_all.py"
-run_module "watch_http_all.py"
+run_module "program/watch_sync_program.py"
+run_module "enum/watch_enum_all.py"
+run_module "ns/watch_ns_all.py"
+run_module "http/watch_http_all.py"
 
 echo "---------------------------------------------------"
 echo "[+] All pipeline stages completed successfully."
