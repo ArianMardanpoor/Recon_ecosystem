@@ -253,6 +253,7 @@ export default defineConfig(({ mode }) => {
         ".manusvm.computer",
         "localhost",
         "127.0.0.1",
+        "watchtower", // <-- Added watchtower here
       ],
 
       fs: {
