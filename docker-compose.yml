@@ -39,6 +39,9 @@ services:
       - watchtower-net
     volumes:
       - recon-results:/xsscanner/results
+      - ./.env:/watchtower/.env:ro 
+      - ./.env:/xsscanner/.env:ro
+      - ./.env:/.env:ro
     profiles:
       - manual
 
