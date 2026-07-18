@@ -4,6 +4,7 @@
 // - Added hasClientSideJSRisk() to perform a lightweight GET and check for <script> tags.
 // - Changed DOM check skipping logic to only trigger when NO JavaScript is present in the DOM.
 // - Retained SPA logic for skipping Header Injection.
+// - Added diagnostic logging for nuclei and dom_sink_checker silent failures & results.
 
 package main
 
@@ -1291,7 +1292,13 @@ func processURL(targetURL string, index, total int) {
 				}
 
 				if domSinkCheckerExists {
-					res, _ := runCommand("./dom_sink_checker", "-l", pf)
+					res, err := runCommand("./dom_sink_checker", "-l", pf)
+					if err != nil {
+						logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, pf, err)
+					} else if res == "" {
+						logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, pf)
+					}
+
 					if res != "" {
 						lines := strings.Split(strings.TrimSpace(res), "\n")
 						for _, l := range lines {
@@ -1304,8 +1311,19 @@ func processURL(targetURL string, index, total int) {
 					}
 				}
 			} else {
-				res, _ := runCommand("nuclei", "-l", pf, "-t", canaryTemplate, "-silent")
-				p3Findings[probePhase] = append(p3Findings[probePhase], extractURLsFromNuclei(res)...)
+				res, err := runCommand("nuclei", "-l", pf, "-t", canaryTemplate, "-silent")
+				if err != nil {
+					logLine("NUCLEI-ERR", X_red, "%s (%s): nuclei exited with error: %v", targetURL, pf, err)
+				} else if res == "" {
+					logLine("NUCLEI-EMPTY", X_yellow, "%s (%s): nuclei ran but returned no output", targetURL, pf)
+				}
+
+				if res != "" {
+					foundURLs := extractURLsFromNuclei(res)
+					probedCount := countLines(pf)
+					logLine("NUCLEI-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", pf, probedCount, len(foundURLs))
+					p3Findings[probePhase] = append(p3Findings[probePhase], foundURLs...)
+				}
 			}
 		}
 	}
@@ -1320,7 +1338,13 @@ func processURL(targetURL string, index, total int) {
 		} else if !targetAlive {
 			domProbeSkippedAll = true
 		} else if domSinkCheckerExists {
-			res, _ := runCommand("./dom_sink_checker", "-l", domQueryProbeFile)
+			res, err := runCommand("./dom_sink_checker", "-l", domQueryProbeFile)
+			if err != nil {
+				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, domQueryProbeFile, err)
+			} else if res == "" {
+				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, domQueryProbeFile)
+			}
+
 			if res != "" {
 				lines := strings.Split(strings.TrimSpace(res), "\n")
 				for _, l := range lines {
@@ -1559,8 +1583,22 @@ func processURL(targetURL string, index, total int) {
 
 		exts := map[string]string{".get": "get", ".json": "json"}
 		for ext, ph := range exts {
-			if findings, _ := runCommand("nuclei", "-l", finalX9Base+ext, "-t", nucleiTemplate, "-silent"); findings != "" {
-				report.aggregateFindings(findings, ph)
+			atkFile := finalX9Base + ext
+			if _, statErr := os.Stat(atkFile); statErr == nil {
+				findings, err := runCommand("nuclei", "-l", atkFile, "-t", nucleiTemplate, "-silent")
+
+				if err != nil {
+					logLine("NUCLEI-ERR", X_red, "%s (%s): nuclei exited with error: %v", targetURL, atkFile, err)
+				} else if findings == "" {
+					logLine("NUCLEI-EMPTY", X_yellow, "%s (%s): nuclei ran but returned no output", targetURL, atkFile)
+				}
+
+				if findings != "" {
+					foundURLs := extractURLsFromNuclei(findings)
+					probedCount := countLines(atkFile)
+					logLine("NUCLEI-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(foundURLs))
+					report.aggregateFindings(findings, ph)
+				}
 			}
 		}
 
@@ -1648,8 +1686,17 @@ func processURL(targetURL string, index, total int) {
 			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(fragmentURLs), "\n")), 0644)
 			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom")
 			runCommand("./x9", "-i", atkIn, "-dom", "-o", finalX9Base)
+
 			if domSinkCheckerExists {
-				if dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".dom.attack", "-timeout", "300"); dom != "" {
+				atkFile := finalX9Base + ".dom.attack"
+				dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
+				if err != nil {
+					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
+				} else if dom == "" {
+					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
+				}
+
+				if dom != "" {
 					report.aggregateFindings(dom, "dom_confirmed")
 				}
 			}
@@ -1684,8 +1731,16 @@ func processURL(targetURL string, index, total int) {
 			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(domQueryURLs), "\n")), 0644)
 			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom-query")
 			runCommand("./x9", "-i", atkIn, "-o", finalX9Base)
+
 			if domSinkCheckerExists {
-				dom, _ := runCommand("./dom_sink_checker", "-xss", "-l", finalX9Base+".get", "-timeout", "300")
+				atkFile := finalX9Base + ".get"
+				dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
+				if err != nil {
+					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
+				} else if dom == "" {
+					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
+				}
+
 				if dom != "" {
 					report.aggregateFindings(dom, "dom_confirmed")
 				}
