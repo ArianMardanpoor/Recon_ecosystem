@@ -925,7 +925,6 @@ func extractURLsFromNuclei(nucleiOutput string) []string {
 	return urls
 }
 
-
 // ── Generic Reflector Detection ─────────────────────────────────────────────
 
 func isGenericReflector(targetURL string) bool {
@@ -1127,9 +1126,9 @@ func processURL(targetURL string, index, total int) {
 	logLine("TARGET", X_white, "[%d/%d | Vulns: %d] %s", currProcessed, total, currVulns, targetURL)
 
 	if !skipSPA && spadetect.IsSPA(targetURL) {
-			logLine("SKIP", X_yellow, "SPA/React detected, skipping heavy scan for %s", targetURL)
-			return
-		}
+		logLine("SKIP", X_yellow, "SPA/React detected, skipping heavy scan for %s", targetURL)
+		return
+	}
 
 	if isGenericReflector(targetURL) {
 		logLine("SKIP", X_yellow, "Generic reflector detected, skipping %s", targetURL)
@@ -1753,6 +1752,19 @@ func countLines(filename string) int {
 	}
 	return count
 }
+func urlSignature(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	var paramNames []string
+	for k := range u.Query() {
+		paramNames = append(paramNames, k)
+	}
+	sort.Strings(paramNames)
+	return path + "?" + strings.Join(paramNames, ",")
+}
 
 // ── main ────────────────────────────────────────────────────────────────────
 
@@ -1778,10 +1790,10 @@ func main() {
 	hcTimeoutFlag := flag.Duration("hc-timeout", 5*time.Second, "Proxy health-check timeout")
 	flag.Parse()
 	ratelimit.Init(ratelimit.Config{
-    ReqPerSec:           *rateLimitFlag,
-    HealthCheckInterval: *hcIntervalFlag,
-    HealthCheckTimeout:  *hcTimeoutFlag,
-})
+		ReqPerSec:           *rateLimitFlag,
+		HealthCheckInterval: *hcIntervalFlag,
+		HealthCheckTimeout:  *hcTimeoutFlag,
+	})
 
 	// ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
 	_ = ratelimit.LoadProxies("proxies.txt")
@@ -1876,17 +1888,28 @@ func main() {
 
 	var finalURLs []string
 	for _, groupUrls := range groups {
-		sort.Slice(groupUrls, func(i, j int) bool {
+		// 1. Deduplicate by signature
+		seenSig := make(map[string]bool)
+		var deduped []string
+		for _, u := range groupUrls {
+			sig := urlSignature(u)
+			if !seenSig[sig] {
+				seenSig[sig] = true
+				deduped = append(deduped, u)
+			}
+		}
+		groupUrls = deduped
+
+		// 2. Stable sort to prioritize URLs with query parameters without penalizing long paths
+		sort.SliceStable(groupUrls, func(i, j int) bool {
 			pi, _ := url.Parse(groupUrls[i])
 			pj, _ := url.Parse(groupUrls[j])
 			hasQi := pi != nil && len(pi.RawQuery) > 0
 			hasQj := pj != nil && len(pj.RawQuery) > 0
-			if hasQi != hasQj {
-				return hasQi
-			}
-			return len(groupUrls[i]) < len(groupUrls[j])
+			return hasQi && !hasQj
 		})
 
+		// 3. Keep existing truncation logic, which now operates on the deduped, properly sorted list
 		if maxURLsPerTarget > 0 && len(groupUrls) > maxURLsPerTarget {
 			groupUrls = groupUrls[:maxURLsPerTarget]
 		}
