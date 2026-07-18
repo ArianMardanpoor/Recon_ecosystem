@@ -2,16 +2,15 @@ id: x9-v2-reflection-matcher
 
 info:
   name: X9 v2 Reflection Matcher (Randomized)
-  author: arian & manus
+  author: arian
   severity: info
   description: Detects randomized reflection patterns from x9 v2 to bypass WAF signatures.
   tags: reflection, xss, bypass
 
 http:
-  - raw:
-      - |
-        GET {{Path}} HTTP/1.1
-        Host: {{Host}}
+  - method: GET
+    path:
+      - "{{BaseURL}}"
 
     matchers-condition: or
     matchers:

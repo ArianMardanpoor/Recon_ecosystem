@@ -2,7 +2,7 @@ id: dom-xss-headless
 
 info:
   name: DOM-based XSS Detection (Headless)
-  author: arian & manus
+  author: arian
   severity: high
   description: |
     Uses a headless browser to detect if injected parameters reflect into dangerous DOM sinks.

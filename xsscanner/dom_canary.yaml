@@ -2,7 +2,7 @@ id: dom-canary-headless
 
 info:
   name: DOM Canary Reflection Detection (Headless)
-  author: arian & manus
+  author: arian
   severity: info
   description: Detects simple canary reflection in DOM sinks to identify potentially vulnerable parameters for DOM XSS.
   tags: headless, dom, canary
