@@ -33,6 +33,13 @@ docker compose up -d --build watchtower-api
 ```
 docker compose logs -f watchtower-api
 ```
+# tmux for watchtower
+```
+tmux new -s w
+```
+# tmux for xsscanner
+tmux new -s x
+```
 # full scan command
 ```
 docker compose run --rm recon-tools bash -c \
