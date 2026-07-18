@@ -29,6 +29,10 @@ vim .env
 ```
 docker compose up -d --build watchtower-api
 ```
+# check the api logs
+```
+docker compose logs -f watchtower-api
+```
 # full scan command
 ```
 docker compose run --rm recon-tools bash -c \
