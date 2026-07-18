@@ -4,6 +4,7 @@
 // - When strict=true, only use parameters present in the URL and from -p file;
 //   defaultParams are NOT added.
 // - If strict=true and URL has no query params, skip and print to stderr.
+// - Added buildURLSafe wrapper to catch and log URL path truncation regressions.
 
 package main
 
@@ -125,6 +126,33 @@ func buildURL(base *ParsedURL, params map[string]string) string {
 		Fragment: base.Fragment,
 	}
 	return u.String()
+}
+
+// buildURLSafe acts as a safety net ensuring that query parameter modifications
+// never silently alter or drop the base URL's intended path.
+func buildURLSafe(base *ParsedURL, params map[string]string) (string, bool) {
+	constructedURL := buildURL(base, params)
+
+	parsed, err := parseURL(constructedURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] buildURLSafe failed to parse constructed URL: %v\n", err)
+		return "", false
+	}
+
+	if parsed.Path != base.Path {
+		baseStr := base.Scheme + "://" + base.Host + base.Path
+		if base.RawQuery != "" {
+			baseStr += "?" + base.RawQuery
+		}
+		if base.Fragment != "" {
+			baseStr += "#" + base.Fragment
+		}
+
+		fmt.Fprintf(os.Stderr, "[ERROR] buildURL path mismatch: expected path=%q got path=%q (base=%q)\n", base.Path, parsed.Path, baseStr)
+		return "", false
+	}
+
+	return constructedURL, true
 }
 
 // getAllParams now accepts a 'strict' flag.
@@ -262,7 +290,11 @@ func main() {
 					newParams[k] = v
 				}
 				newParams[p] = payload
-				generatedURL := buildURL(base, newParams)
+				generatedURL, ok := buildURLSafe(base, newParams)
+				if !ok {
+					continue // Skip malicious payload generation if the path dropped
+				}
+
 				fmt.Fprintln(fGet, generatedURL)
 				repLogger.Log(reporter.NewFinding(
 					base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
@@ -292,7 +324,11 @@ func main() {
 				tempBase := *base
 				tempBase.Fragment = payload
 				// buildURL correctly preserves all parameters from base.Params
-				urlWithFragment := buildURL(&tempBase, base.Params)
+				urlWithFragment, ok := buildURLSafe(&tempBase, base.Params)
+				if !ok {
+					continue // Skip if path integrity check fails
+				}
+
 				if probeMode {
 					if fDomCanary != nil {
 						fmt.Fprintln(fDomCanary, urlWithFragment)

@@ -1765,6 +1765,65 @@ func urlSignature(rawURL string) string {
 	sort.Strings(paramNames)
 	return path + "?" + strings.Join(paramNames, ",")
 }
+func queryValueLength(rawURL string) int {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return 0
+	}
+	totalLen := 0
+	for _, vals := range u.Query() {
+		for _, v := range vals {
+			totalLen += len(v)
+		}
+	}
+	return totalLen
+}
+
+// NEW: Deduplicate URLs by signature, preserving the one with the longest query values
+func dedupBySignature(urls []string) []string {
+	type sigEntry struct {
+		bestURL string
+		bestLen int
+		order   int
+	}
+	sigMap := make(map[string]*sigEntry)
+	var orderCounter int
+
+	for _, u := range urls {
+		sig := urlSignature(u)
+		valLen := queryValueLength(u)
+
+		if entry, exists := sigMap[sig]; exists {
+			// Prefer strictly longer value lengths (preserves first-occurrence on tie)
+			if valLen > entry.bestLen {
+				entry.bestURL = u
+				entry.bestLen = valLen
+			}
+		} else {
+			sigMap[sig] = &sigEntry{
+				bestURL: u,
+				bestLen: valLen,
+				order:   orderCounter,
+			}
+			orderCounter++
+		}
+	}
+
+	// Reconstruct list in original signature appearance order
+	orderedSigs := make([]*sigEntry, 0, len(sigMap))
+	for _, entry := range sigMap {
+		orderedSigs = append(orderedSigs, entry)
+	}
+	sort.Slice(orderedSigs, func(i, j int) bool {
+		return orderedSigs[i].order < orderedSigs[j].order
+	})
+
+	result := make([]string, len(orderedSigs))
+	for i, entry := range orderedSigs {
+		result[i] = entry.bestURL
+	}
+	return result
+}
 
 // ── main ────────────────────────────────────────────────────────────────────
 
@@ -1887,17 +1946,16 @@ func main() {
 	}
 
 	var finalURLs []string
-	for _, groupUrls := range groups {
-		// 1. Deduplicate by signature
-		seenSig := make(map[string]bool)
-		var deduped []string
-		for _, u := range groupUrls {
-			sig := urlSignature(u)
-			if !seenSig[sig] {
-				seenSig[sig] = true
-				deduped = append(deduped, u)
-			}
-		}
+	for rootDomain, groupUrls := range groups {
+		origCount := len(groupUrls)
+
+		// 1. Deduplicate by signature (preferring longest param values)
+		deduped := dedupBySignature(groupUrls)
+		dedupCount := len(deduped)
+
+		// Log the dedup stats per root domain group
+		logLine("DEDUP", X_cyan, "%s: %d URLs -> %d unique signatures (dropped %d)", rootDomain, origCount, dedupCount, origCount-dedupCount)
+
 		groupUrls = deduped
 
 		// 2. Stable sort to prioritize URLs with query parameters without penalizing long paths
