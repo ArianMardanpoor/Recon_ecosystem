@@ -1,10 +1,12 @@
 // FILE: x9.go — MODIFIED
-// Changes:
-// - Added -strict flag (default false).
-// - When strict=true, only use parameters present in the URL and from -p file;
-//   defaultParams are NOT added.
-// - If strict=true and URL has no query params, skip and print to stderr.
-// - Added buildURLSafe wrapper to catch and log URL path truncation regressions.
+//
+// SUMMARY OF NEW FLAGS:
+// -path-inject   : Generates an additional URL where the payload is appended as a new path
+//                  segment (e.g., /original/path/payload) and writes to `.path` file.
+// -encoding      : Accepts "single" (default) or "double". If "double", it outputs BOTH
+//                  single and double-encoded variants of the query parameter payload.
+// -value-strategy: Accepts "replace" (default) or "append". If "append", the payload is
+//                  appended to the parameter's existing value rather than overwriting it.
 
 package main
 
@@ -193,15 +195,18 @@ func getAllParams(originalParams map[string]string, paramFile string, probeMode 
 
 func main() {
 	var (
-		inputFile  string
-		paramFile  string
-		outputBase string
-		singleURL  string
-		probeMode  bool
-		jsonMode   bool
-		headerMode bool
-		domMode    bool
-		strictMode bool // NEW
+		inputFile    string
+		paramFile    string
+		outputBase   string
+		singleURL    string
+		probeMode    bool
+		jsonMode     bool
+		headerMode   bool
+		domMode      bool
+		strictMode   bool
+		pathInject   bool   // NEW
+		encodingType string // NEW
+		valStrategy  string // NEW
 	)
 
 	flag.StringVar(&inputFile, "i", "", "File containing URLs")
@@ -212,8 +217,12 @@ func main() {
 	flag.BoolVar(&jsonMode, "json", false, "Enable JSON body generation")
 	flag.BoolVar(&headerMode, "headers", false, "Enable Header injection mode")
 	flag.BoolVar(&domMode, "dom", false, "Enable DOM fragment injection mode")
-	flag.BoolVar(&strictMode, "strict", false, "Only use existing parameters, no default list") // NEW
+	flag.BoolVar(&strictMode, "strict", false, "Only use existing parameters, no default list")
+	flag.BoolVar(&pathInject, "path-inject", false, "Inject payloads directly into the URL path as a new segment")                           // NEW
+	flag.StringVar(&encodingType, "encoding", "single", "Encoding type: 'single' or 'double' (if double, generates both single and double)") // NEW
+	flag.StringVar(&valStrategy, "value-strategy", "replace", "Value strategy: 'replace' or 'append' to parameter's original value")         // NEW
 	flag.Parse()
+
 	repLogger, err := reporter.NewLogger("results/raw_findings.jsonl")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[x9] reporter init failed: %v\n", err)
@@ -244,7 +253,7 @@ func main() {
 	fGet, _ := os.Create(outputBase + ".get")
 	defer fGet.Close()
 
-	var fJson, fHeader, fDomCanary, fDomAttack *os.File
+	var fJson, fHeader, fDomCanary, fDomAttack, fPath *os.File
 	if jsonMode {
 		fJson, _ = os.Create(outputBase + ".json")
 		defer fJson.Close()
@@ -258,6 +267,16 @@ func main() {
 		defer fDomCanary.Close()
 		fDomAttack, _ = os.Create(outputBase + ".dom.attack")
 		defer fDomAttack.Close()
+	}
+	if pathInject {
+		fPath, _ = os.Create(outputBase + ".path")
+		defer fPath.Close()
+	}
+
+	// Determine encodings to run
+	encodings := []string{"single"}
+	if encodingType == "double" {
+		encodings = append(encodings, "double")
 	}
 
 	for _, raw := range rawURLs {
@@ -283,23 +302,41 @@ func main() {
 		allParams := getAllParams(base.Params, paramFile, probeMode, strictMode)
 
 		for _, payload := range payloads {
-			// 1. Standard URL Parameters
+			// 1. Standard URL Parameters (incorporating Double-Encoding and Value Strategy)
 			for _, p := range allParams {
-				newParams := make(map[string]string)
-				for k, v := range base.Params {
-					newParams[k] = v
-				}
-				newParams[p] = payload
-				generatedURL, ok := buildURLSafe(base, newParams)
-				if !ok {
-					continue // Skip malicious payload generation if the path dropped
-				}
+				for _, enc := range encodings {
+					newParams := make(map[string]string)
+					for k, v := range base.Params {
+						newParams[k] = v
+					}
 
-				fmt.Fprintln(fGet, generatedURL)
-				repLogger.Log(reporter.NewFinding(
-					base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
-					reporter.Context{Location: "query parameter"},
-				))
+					// Prepare payload encoding
+					// buildURLSafe will automatically encode the value once.
+					// If we pre-encode it here, it gets double encoded.
+					activePayload := payload
+					if enc == "double" {
+						activePayload = url.QueryEscape(payload)
+					}
+
+					// Value Strategy implementation
+					injectedVal := activePayload
+					if valStrategy == "append" {
+						injectedVal = base.Params[p] + activePayload
+					}
+
+					newParams[p] = injectedVal
+
+					generatedURL, ok := buildURLSafe(base, newParams)
+					if !ok {
+						continue // Skip malicious payload generation if the path dropped
+					}
+
+					fmt.Fprintln(fGet, generatedURL)
+					repLogger.Log(reporter.NewFinding(
+						base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
+						reporter.Context{Location: "query parameter"},
+					))
+				}
 			}
 
 			// 2. JSON Body Mode
@@ -321,13 +358,19 @@ func main() {
 
 			// 4. DOM Fragment Injection Mode
 			if domMode {
-				tempBase := *base
-				tempBase.Fragment = payload
-				// buildURL correctly preserves all parameters from base.Params
-				urlWithFragment, ok := buildURLSafe(&tempBase, base.Params)
-				if !ok {
-					continue // Skip if path integrity check fails
+				// FRAGMENT INJECTION REVIEW: Reviewed against legacy buildFragmentInjectionURLs().
+				// GAP FOUND: The existing logic (buildURLSafe) reconstructed the raw query string
+				// from base.Params, which strips duplicate parameters and changes original parameter order.
+				// FIX: Manually format using base.RawQuery to perfectly preserve the query string shape.
+
+				domURL := &url.URL{
+					Scheme:   base.Scheme,
+					Host:     base.Host,
+					Path:     base.Path,
+					RawQuery: base.RawQuery,
+					Fragment: payload, // url.URL stringification safely escapes the fragment
 				}
+				urlWithFragment := domURL.String()
 
 				if probeMode {
 					if fDomCanary != nil {
@@ -338,6 +381,23 @@ func main() {
 						fmt.Fprintln(fDomAttack, urlWithFragment)
 					}
 				}
+			}
+
+			// 5. Path Injection Mode
+			if pathInject && fPath != nil {
+				// Construct path manually to prevent unintended auto-encoding of slashes/characters,
+				// matching legacy structural logic while avoiding buildURLSafe checks since path mutates.
+				newPath := strings.TrimRight(base.Path, "/") + "/" + payload
+
+				pathURL := fmt.Sprintf("%s://%s%s", base.Scheme, base.Host, newPath)
+				if base.RawQuery != "" {
+					pathURL += "?" + base.RawQuery
+				}
+				if base.Fragment != "" {
+					pathURL += "#" + base.Fragment
+				}
+
+				fmt.Fprintln(fPath, pathURL)
 			}
 		}
 	}
