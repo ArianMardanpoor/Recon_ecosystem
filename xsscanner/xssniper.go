@@ -4,6 +4,7 @@
 // - Added curlCheckerExists detection and appropriate logging.
 // - Added helpers: extractReflectedURLsFromCurl, aggregateCurlFindings.
 // - Updated Phase 3 probe loop and Phase 4 heavy-attack loop to use curl_reflect_checker.
+// - FIX BUG2: Migrated http-request-to-target functions from net/http to curl-exec to avoid JA3 blocks.
 
 package main
 
@@ -14,16 +15,15 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +35,77 @@ import (
 )
 
 var repLogger *reporter.Logger
+
+// FIX BUG2: Shared User-Agent constant for curl requests
+const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+	"AppleWebKit/537.36 (KHTML, like Gecko) " +
+	"Chrome/126.0.0.0 Safari/537.36"
+
+// ── Curl Request Helper ──────────────────────────────────────────────────────
+
+// FIX BUG2: curlRequest issues a single HTTP request via the curl binary (exec'd) instead
+// of Go's net/http, to avoid JA3/TLS fingerprinting blocks by WAFs.
+// Returns the HTTP status code and the response body.
+func curlRequest(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
+	args := []string{
+		"-s",
+		"-L",
+		"--max-time", strconv.Itoa(timeout),
+		"-A", userAgent,
+		"-w", "\\nHTTPSTATUS:%{http_code}",
+	}
+
+	if method == "HEAD" {
+		args = append(args, "-I")
+	} else if method == "POST" {
+		args = append(args, "-X", "POST")
+		args = append(args, "-H", "Content-Type: application/json")
+		if body != "" {
+			// Using --data-raw to ensure special break characters (&, <, ', etc.) are not mangled
+			args = append(args, "--data-raw", body)
+		}
+	} else if method != "GET" && method != "" {
+		args = append(args, "-X", method)
+	}
+
+	// FIX BUG2: Always add Cache-Busting headers centrally
+	args = append(args, "-H", "Cache-Control: no-cache, no-store, must-revalidate")
+	args = append(args, "-H", "Pragma: no-cache")
+
+	for k, v := range headers {
+		args = append(args, "-H", fmt.Sprintf("%s: %s", k, v))
+	}
+
+	args = append(args, targetURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout+10)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "curl", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdout, cmdErr := cmd.Output()
+
+	marker := []byte("\nHTTPSTATUS:")
+	idx := bytes.LastIndex(stdout, marker)
+	if idx < 0 {
+		return 0, nil, fmt.Errorf("curl failed or no marker: %v (stderr: %s)", cmdErr, stderrBuf.String())
+	}
+
+	respBody = stdout[:idx]
+	statusStr := strings.TrimSpace(string(stdout[idx+len(marker):]))
+	statusCode, atoiErr := strconv.Atoi(statusStr)
+	if atoiErr != nil {
+		return 0, respBody, fmt.Errorf("unparseable status %q", statusStr)
+	}
+
+	if statusCode == 0 {
+		return 0, respBody, fmt.Errorf("connection failed (status 000)")
+	}
+
+	return statusCode, respBody, nil
+}
 
 // ── Tech Profile & Classification ───────────────────────────────────────────
 
@@ -75,29 +146,14 @@ func classifyTechProfile(techList []string) TechProfile {
 // If it fails or times out, it conservatively returns true (assume JS exists).
 func hasClientSideJSRisk(targetURL string) bool {
 	ratelimit.Acquire(targetURL)
-	client := ratelimit.GetHTTPClient(targetURL)
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
+
+	// FIX BUG2: Replaced net/http logic with curlRequest helper
+	statusCode, respBody, err := curlRequest(targetURL, "GET", nil, "", 15)
+	if err != nil || statusCode == 0 {
 		return true // conservative fallback
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; xssniper)")
 
-	// FIX BUG1: Cache-Busting headers
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("Pragma", "no-cache")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return true
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return true
-	}
-
-	bodyLower := strings.ToLower(string(bodyBytes))
+	bodyLower := strings.ToLower(string(respBody))
 	return strings.Contains(bodyLower, "<script")
 }
 
@@ -477,33 +533,13 @@ func severityWeight(s string) int {
 
 func verifyReflection(targetURL, method string, headers map[string]string, body, canary string) bool {
 	ratelimit.Acquire(targetURL)
-	client := ratelimit.GetHTTPClient(targetURL)
-	var req *http.Request
-	var err error
 
-	if method == "POST" {
-		req, err = http.NewRequest("POST", targetURL, strings.NewReader(body))
-		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-	} else {
-		req, err = http.NewRequest("GET", targetURL, nil)
-	}
-
-	if err != nil {
+	// FIX BUG2: Replaced net/http setup with curlRequest helper
+	statusCode, respBody, err := curlRequest(targetURL, method, headers, body, 15)
+	if err != nil || statusCode == 0 {
 		return false
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
 	return strings.Contains(string(respBody), canary)
 }
 
@@ -571,8 +607,7 @@ func dedupeNucleiFindings(report VulnerabilityReport) string {
 	sb.WriteString(fmt.Sprintf("%s%s%s", X_bold, report.URL, X_reset))
 	renderSection("Query Params", report.QueryParameters)
 	renderSection("Headers", report.Headers)
-	renderSection("JSON Body", report.JSONBody)
-	renderSection("DOM", report.DOM)
+	renderSection("JSON Body", report.DOM)
 	return sb.String()
 }
 
@@ -843,17 +878,7 @@ func isConcreteURL(rawURL string) bool {
 }
 
 func isTargetAlive(targetURL string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
 	ratelimit.Acquire(targetURL)
-	client := ratelimit.GetHTTPClient(targetURL)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return fmt.Errorf("too many redirects")
-		}
-		return nil
-	}
 
 	u, err := url.Parse(targetURL)
 	if err != nil {
@@ -862,34 +887,31 @@ func isTargetAlive(targetURL string) bool {
 	u.Fragment = ""
 	checkURL := u.String()
 
-	req, _ := http.NewRequestWithContext(ctx, "HEAD", checkURL, nil)
-	resp, err := client.Do(req)
+	// FIX BUG2: Implemented HEAD and GET logic using curlRequest. Handles status 000 (conn err) vs 4xx.
+	statusCode, _, err := curlRequest(checkURL, "HEAD", nil, "", 5)
 
-	if err != nil {
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel2()
-		reqGET, _ := http.NewRequestWithContext(ctx2, "GET", checkURL, nil)
-		resp, err = client.Do(reqGET)
-		if err != nil {
+	if statusCode == 0 {
+		// Connection failed completely, fallback to GET to be sure
+		statusCode, _, err = curlRequest(checkURL, "GET", nil, "", 5)
+		if statusCode == 0 {
 			return false
 		}
 	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+		// HTTP response received (transport alive)
+		if statusCode < 400 || statusCode == 401 || statusCode == 403 {
 			return true
 		}
-		if resp.StatusCode >= 404 && resp.StatusCode != 405 {
+		if statusCode >= 404 && statusCode != 405 {
 			return false
 		}
-		reqGET, _ := http.NewRequestWithContext(ctx, "GET", checkURL, nil)
-		resp, err = client.Do(reqGET)
-		if err != nil {
+		// Fallback to GET for 405 or other ambiguous responses
+		statusCode, _, err = curlRequest(checkURL, "GET", nil, "", 5)
+		if statusCode == 0 {
 			return false
 		}
-		defer resp.Body.Close()
 	}
 
-	return resp.StatusCode < 500
+	return statusCode < 500
 }
 
 func checkConnectivity() bool {
@@ -945,7 +967,7 @@ func isGenericReflector(targetURL string) bool {
 	q.Set("xprobe4", "CANARY_D")
 	q.Set("xprobe5", "CANARY_E")
 
-	// FIX BUG1: Cache-Busting param for isGenericReflector
+	// Cache-Busting param for isGenericReflector
 	cbName := "_cb"
 	_, exists := q[cbName]
 	for exists {
@@ -958,34 +980,14 @@ func isGenericReflector(targetURL string) bool {
 	finalURL := u.String()
 
 	ratelimit.Acquire(finalURL)
-	client := ratelimit.GetHTTPClient(finalURL)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 2 {
-			return http.ErrUseLastResponse
-		}
-		return nil
-	}
 
-	req, err := http.NewRequest("GET", finalURL, nil)
-	if err != nil {
+	// FIX BUG2: Use curlRequest
+	statusCode, respBody, err := curlRequest(finalURL, "GET", nil, "", 10)
+	if err != nil || statusCode == 0 {
 		return false
 	}
 
-	// FIX BUG1: Cache-Busting headers
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("Pragma", "no-cache")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false
-	}
-	body := string(bodyBytes)
-
+	body := string(respBody)
 	canaries := []string{"CANARY_A", "CANARY_B", "CANARY_C", "CANARY_D", "CANARY_E"}
 	count := 0
 	for _, c := range canaries {
@@ -1051,12 +1053,9 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 	// ۱. گرفتن اجازه (Token) قبل از شروع هر درخواست شبکه برای این دامنه
 	ratelimit.Acquire(targetURL)
 
-	// ۲. استفاده از کلاینت مدیریت‌شده (همراه با Proxy چرخشی و Timeout)
-	client := ratelimit.GetHTTPClient(targetURL)
-
 	finalURL := targetURL
 
-	// FIX BUG1: Cache-Busting param for GET requests in reflection check
+	// Cache-Busting param for GET requests in reflection check
 	if method == "GET" {
 		if u, err := url.Parse(targetURL); err == nil {
 			q := u.Query()
@@ -1073,35 +1072,13 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 		}
 	}
 
-	var req *http.Request
-	var err error
-	if method == "POST" {
-		req, err = http.NewRequest("POST", finalURL, strings.NewReader(body))
-		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-	} else {
-		req, err = http.NewRequest("GET", finalURL, nil)
-	}
-	if err != nil || req == nil {
+	// FIX BUG2: Use curlRequest
+	statusCode, respBody, err := curlRequest(finalURL, method, headers, body, 15)
+	if err != nil || statusCode == 0 {
 		return false
 	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
 
-	// FIX BUG1: Cache-Busting headers
-	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	req.Header.Set("Pragma", "no-cache")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-
-	b, _ := io.ReadAll(resp.Body)
-	return strings.Contains(string(b), payload)
+	return strings.Contains(string(respBody), payload)
 }
 
 func checkHeaderReflection(targetURL, headerName, headerValue string) bool {
@@ -2125,7 +2102,7 @@ func main() {
 	flag.BoolVar(&allowWildcards, "allow-wildcards", false, "Allow wildcard URLs")
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
-	// Add these to your var block in main()
+
 	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
 	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")
 	hcTimeoutFlag := flag.Duration("hc-timeout", 5*time.Second, "Proxy health-check timeout")

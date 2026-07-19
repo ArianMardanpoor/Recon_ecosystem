@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync" // FIX BUG3: Added sync for WaitGroup and Mutex
 	"time"
 
 	"github.com/go-rod/rod"
@@ -114,7 +115,8 @@ func safeClose(page *rod.Page) {
 	page.MustClose()
 }
 
-func checkURL(browser *rod.Browser, targetURL, hookCode string, timeout int) {
+// FIX BUG3: Added outMu *sync.Mutex to protect standard output in parallel executions
+func checkURL(browser *rod.Browser, targetURL, hookCode string, timeout int, outMu *sync.Mutex) {
 	page, err := browser.Page(proto.TargetCreateTarget{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] could not create page: %v\n", err)
@@ -161,7 +163,10 @@ func checkURL(browser *rod.Browser, targetURL, hookCode string, timeout int) {
 				fmt.Fprintf(os.Stderr, "[ERROR] marshal failed: %v\n", err)
 				return
 			}
+			// FIX BUG3: Use outMu lock to prevent output interleaving from multiple goroutines
+			outMu.Lock()
 			fmt.Println(string(jsonData))
+			outMu.Unlock()
 		}
 	}
 }
@@ -170,6 +175,8 @@ func main() {
 	xssMode := flag.Bool("xss", false, "Use break-char pattern instead of canary pattern")
 	timeout := flag.Int("timeout", 15, "Timeout per page in seconds")
 	inputFile := flag.String("l", "", "Input file with URLs")
+	// FIX BUG3: Added new flag for concurrency control
+	concurrency := flag.Int("c", 4, "number of concurrent browser pages to check in parallel")
 	flag.Parse()
 
 	hookCode := canaryHook
@@ -194,19 +201,52 @@ func main() {
 		scanner = bufio.NewScanner(f)
 	}
 
+	// FIX BUG3: Created Mutex for thread-safe printing
+	var outMu sync.Mutex
+
+	// FIX BUG3: Implemented worker pool based on curl_reflect_checker.go pattern
+	c := *concurrency
+	if c < 1 {
+		c = 1
+	}
+
+	urls := make(chan string, c*2)
+	var wg sync.WaitGroup
+
+	for i := 0; i < c; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for u := range urls {
+				safeCheckURL(browser, u, hookCode, *timeout, &outMu)
+			}
+		}()
+	}
+
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" && strings.HasPrefix(line, "http") {
-			safeCheckURL(browser, line, hookCode, *timeout)
+			// FIX BUG3: Push URL to channel instead of executing sequentially
+			urls <- line
 		}
+	}
+
+	// FIX BUG3: Close channel and wait for all workers to finish
+	close(urls)
+	wg.Wait()
+
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] reading input: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func safeCheckURL(browser *rod.Browser, targetURL, hookCode string, timeout int) {
+// FIX BUG3: Added outMu *sync.Mutex to parameter list
+func safeCheckURL(browser *rod.Browser, targetURL, hookCode string, timeout int, outMu *sync.Mutex) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "[WARN] checkURL panic for %s: %v\n", targetURL, r)
 		}
 	}()
-	checkURL(browser, targetURL, hookCode, timeout)
+	checkURL(browser, targetURL, hookCode, timeout, outMu)
 }
