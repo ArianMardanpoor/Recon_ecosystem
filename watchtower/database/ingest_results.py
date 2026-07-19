@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-\"\"\"
-ingest_results.py - Bridge Go recon pipeline results into MongoDB via db.py
-
-Usage:
-    ingest_results.py <hostname> --workdir <path>
-    ingest_results.py GLOBAL --workdir <path> --global
-
-Reads per-target temp directory structure and ingests findings into MongoDB.
-\"\"\"
-
 import argparse
 import json
 import os

@@ -129,16 +129,23 @@ type APIResponse struct {
 	Pages int `json:"pages"`
 }
 
-func fetchDataFromAPI(mode string) []string {
-	logMsg(fmt.Sprintf("Connecting to API in %s mode...", strings.ToUpper(mode)), M_cyan)
+func fetchDataFromAPI(isFresh bool, program string) []string {
+	logMsg("Connecting to API...", M_cyan)
 	var allURLs []string
 	currentPage := 1
 	perPage := 500
 
 	for {
 		urlStr := fmt.Sprintf("%s?page=%d&per_page=%d", apiURL, currentPage, perPage)
-		if mode == "fresh" {
+
+		// اعمال فیلتر فرش
+		if isFresh {
 			urlStr += "&only_changed=true"
+		}
+
+		// اعمال فیلتر پروگرم
+		if program != "" {
+			urlStr += "&program=" + url.QueryEscape(program)
 		}
 
 		req, _ := http.NewRequest("GET", urlStr, nil)
@@ -437,7 +444,12 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 }
 
 func main() {
-	mode := flag.String("mode", "normal", "Scan mode: normal or fresh")
+	fresh := flag.Bool("fresh", false, "Scan fresh (only changed) targets")
+
+	var program string
+	flag.StringVar(&program, "p", "", "Specific program name to fetch from API")
+	flag.StringVar(&program, "program", "", "Specific program name to fetch from API")
+
 	inputFile := flag.String("i", "", "Input file with targets (skips API)")
 	targetURL := flag.String("u", "", "Single target URL to scan")
 	skipSPA := flag.Bool("skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
@@ -489,13 +501,13 @@ func main() {
 			}
 			file.Close()
 		} else {
-			rawTargets = fetchDataFromAPI(*mode)
+			rawTargets = fetchDataFromAPI(*fresh, program)
 		}
 		if len(rawTargets) == 0 {
 			return
 		}
 
-		if *mode == "fresh" {
+		if *fresh {
 			newTargets = rawTargets
 		} else {
 			newTargets = getNewTargetsOnly(rawTargets)
@@ -507,7 +519,12 @@ func main() {
 		return
 	}
 
-	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(*mode)), M_cyan)
+	modeStr := "normal"
+	if *fresh {
+		modeStr = "fresh"
+	}
+
+	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
 		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase)
 	}
@@ -545,7 +562,7 @@ func main() {
 		}
 
 		caption := fmt.Sprintf("Mode: %s\nTargets: %d\nElapsed: %s\nVulns Found: %d",
-			strings.ToUpper(*mode), len(newTargets), time.Since(startTime).Round(time.Second).String(), vulnCount)
+			strings.ToUpper(modeStr), len(newTargets), time.Since(startTime).Round(time.Second).String(), vulnCount)
 
 		if err := sendTelegramDoc(botToken, chatID, logFilePath, caption); err != nil {
 			logMsg(fmt.Sprintf("Failed to send log to Telegram: %v", err), M_red)

@@ -31,6 +31,7 @@ watchtower-frontend/build/
 # باینری‌های بیلد شده (نام پوشه یا نام ابزار)
 xsscanner/xsscanner
 xsscanner/xssniper
+xsscanner/curl_reflect_checker
 *.exe
 *.bin
 *.test
