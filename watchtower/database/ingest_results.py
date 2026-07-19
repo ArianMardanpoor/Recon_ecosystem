@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+ingest_results.py - Bridge Go recon pipeline results into MongoDB via db.py
+
+Usage:
+    ingest_results.py <hostname> --workdir <path>
+    ingest_results.py GLOBAL --workdir <path> --global
+
+Reads per-target temp directory structure and ingests findings into MongoDB.
+"""
+
 import argparse
 import json
 import os
@@ -39,12 +49,12 @@ CATEGORY_REFLECTION_MAP = {
 # ============================================================================
 
 def safe_name(s: str) -> str:
-    \"\"\"Match Go's safeName function: replace non-alnum with underscore\"\"\"
+    """Match Go's safeName function: replace non-alnum with underscore"""
     return re.sub(r'[^a-zA-Z0-9]', '_', s)
 
 
 def extract_hostname(url: str) -> Optional[str]:
-    \"\"\"Extract hostname from URL for filtering\"\"\"
+    """Extract hostname from URL for filtering"""
     try:
         if '://' in url:
             url = url.split('://', 1)[1]
@@ -58,7 +68,7 @@ def extract_hostname(url: str) -> Optional[str]:
 
 
 def parse_timestamp(ts: str) -> datetime:
-    \"\"\"Parse timestamp string to datetime, fallback to now()\"\"\"
+    """Parse timestamp string to datetime, fallback to now()"""
     try:
         return datetime.fromisoformat(ts.replace('Z', '+00:00'))
     except Exception:
@@ -66,11 +76,11 @@ def parse_timestamp(ts: str) -> datetime:
 
 
 def merge_findings_dedup(findings_list: List[Dict]) -> List[Dict]:
-    \"\"\"
+    """
     Deduplicate findings by (parameter, discovery_source, reflection_type).
     Keep highest confidence on conflict.
     This mirrors db.py's upsert_scan_findings logic.
-    \"\"\"
+    """
     confidence_weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
     merged = {}
     
@@ -211,7 +221,7 @@ def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) ->
                     }
                     findings.append(finding)
         except Exception as e:
-            sys.stderr.write(f"[ingest] Error reading {filepath}: {e}\\n")
+            sys.stderr.write(f"[ingest] Error reading {filepath}: {e}\n")
     
     return findings
 
@@ -229,7 +239,7 @@ def read_triage_file(workdir: Path, hostname: str) -> Dict[str, List[str]]:
         return result
     
     current_section = None
-    param_pattern = re.compile(r'^([a-zA-Z0-9_\-]+)\s*\\|')
+    param_pattern = re.compile(r'^([a-zA-Z0-9_\-]+)\s*\|')
     
     with open(filepath, 'r') as f:
         for line in f:
@@ -359,7 +369,6 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
         )
     
     if all_findings:
-        # CHANGED: The signature for upsert_scan_findings no longer includes scan_status
         upsert_scan_findings(hostname, all_findings)
         
         high_count = sum(1 for f in all_findings if f.get('confidence', '').upper() == 'HIGH')
@@ -401,7 +410,7 @@ def main():
     
     workdir = Path(args.workdir)
     if not workdir.exists():
-        sys.stderr.write(f"[ingest] Error: workdir {workdir} does not exist\\n")
+        sys.stderr.write(f"[ingest] Error: workdir {workdir} does not exist\n")
         sys.exit(0)
     
     try:
@@ -422,7 +431,7 @@ def main():
                   f"-> scan_status={status_str}")
         
     except Exception as e:
-        sys.stderr.write(f"[ingest] Error: {e}\\n")
+        sys.stderr.write(f"[ingest] Error: {e}\n")
         sys.exit(0)
 
 
