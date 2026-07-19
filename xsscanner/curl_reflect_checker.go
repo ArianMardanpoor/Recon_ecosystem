@@ -43,9 +43,11 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 
 // DomSinkOutput matches the struct used elsewhere in the codebase so
 // downstream JSON-line parsing does not need to change.
+// FIX BUG4: Added StatusCode field for visibility into HTTP response codes.
 type DomSinkOutput struct {
-	URL   string   `json:"url"`
-	Sinks []string `json:"sinks"`
+	URL        string   `json:"url"`
+	Sinks      []string `json:"sinks"`
+	StatusCode int      `json:"status_code,omitempty"`
 }
 
 type checkOpts struct {
@@ -181,11 +183,8 @@ func checkURL(rawURL string, opts checkOpts) {
 		return
 	}
 
-	if status >= 400 {
-		fmt.Fprintf(os.Stderr, "[BLOCKED] %s: HTTP %d (possible WAF block, response length %d)\n",
-			rawURL, status, len(body))
-		return
-	}
+	// FIX BUG4: Removed the `if status >= 400 { return }` block entirely
+	// to ensure we check response bodies of 4xx/5xx error pages for reflection.
 
 	// Check for reflection in the response body.
 	var matched bool
@@ -197,11 +196,15 @@ func checkURL(rawURL string, opts checkOpts) {
 
 	if matched {
 		result := DomSinkOutput{
-			URL:   rawURL,
-			Sinks: []string{"body_reflection"},
+			URL:        rawURL,
+			Sinks:      []string{"body_reflection"},
+			StatusCode: status, // FIX BUG4: Added actual HTTP status code for debugging/visibility
 		}
 		opts.outMu.Lock()
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 		opts.outMu.Unlock()
+	} else if status >= 400 {
+		// FIX BUG4: Informational log for high status codes without valid reflection.
+		fmt.Fprintf(os.Stderr, "[INFO] %s: HTTP %d, no reflection found in body (len=%d)\n", rawURL, status, len(body))
 	}
 }
