@@ -5,9 +5,6 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, current_time
 
-# ایمپورت تابع دیس‌کانکت از مونگوانجین
-from mongoengine import disconnect
-
 ENUM_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def run_module(command):
@@ -38,11 +35,6 @@ if __name__ == "__main__":
             
             for mod in modules:
                 commands_to_run.append(["python3", os.path.join(ENUM_DIR, mod), scope])
-
-    # ۲. بستن کانکشن دیتابیس قبل از کارهای سنگین!
-    # این کار باعث میشه pymongo تو بک‌گراند دنبال کانکشن‌های باز نگرده و کرش نکنه
-    disconnect(alias="default")
-    print(f"[{current_time()}] Disconnected from DB to prevent idle timeouts during long enumeration tasks.")
 
     print(f"[{current_time()}] Starting {len(commands_to_run)} enumeration tasks...")
     

@@ -1,10 +1,9 @@
 // FILE: xssniper.go — REFACTORED LOGGING, TECH-AWARE ROUTING & JS RISK DETECTION
 // Changes:
-// - Removed IsLegacyServerRendered logic and legacy framework assumptions.
-// - Added hasClientSideJSRisk() to perform a lightweight GET and check for <script> tags.
-// - Changed DOM check skipping logic to only trigger when NO JavaScript is present in the DOM.
-// - Retained SPA logic for skipping Header Injection.
-// - Added diagnostic logging for nuclei and dom_sink_checker silent failures & results.
+// - Replaced nuclei with curl_reflect_checker for GET and JSON body reflection checks.
+// - Added curlCheckerExists detection and appropriate logging.
+// - Added helpers: extractReflectedURLsFromCurl, aggregateCurlFindings.
+// - Updated Phase 3 probe loop and Phase 4 heavy-attack loop to use curl_reflect_checker.
 
 package main
 
@@ -765,6 +764,7 @@ var (
 	candidateNotified    sync.Map
 	nucleiExists         bool
 	domSinkCheckerExists bool
+	curlCheckerExists    bool // NEW: check for curl_reflect_checker binary
 	skipSPA              bool
 
 	consecutiveDead int64
@@ -1098,6 +1098,182 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// ── New helpers for curl_reflect_checker ──────────────────────────────────
+
+// extractReflectedURLsFromCurl parses the JSON-line output of curl_reflect_checker
+// and returns a slice of URLs that had a reflection (Sinks contains "body_reflection").
+func extractReflectedURLsFromCurl(output string) []string {
+	var urls []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var domOut DomSinkOutput
+		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
+			continue
+		}
+		// Check if reflection was found
+		found := false
+		for _, sink := range domOut.Sinks {
+			if sink == "body_reflection" {
+				found = true
+				break
+			}
+		}
+		if found && domOut.URL != "" {
+			urls = append(urls, domOut.URL)
+		}
+	}
+	return urls
+}
+
+// aggregateCurlFindings adds findings from curl_reflect_checker output (already parsed as reflectedURLs)
+// to the report. It handles "get" and "json" phases with appropriate verification for JSON.
+func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, phase string, targetBase string) {
+	if len(reflectedURLs) == 0 {
+		return
+	}
+
+	// Map to deduplicate by parameter name
+	paramMap := make(map[string]*Vulnerability)
+
+	for _, u := range reflectedURLs {
+		// Extract payload (canary) from URL
+		payload := reX9.FindString(u)
+		if payload == "" {
+			continue
+		}
+
+		// Parse URL to find which query parameter contains the payload
+		parsed, err := url.Parse(u)
+		if err != nil {
+			continue
+		}
+		var paramName string
+		for k, v := range parsed.Query() {
+			for _, val := range v {
+				if strings.Contains(val, payload) {
+					paramName = k
+					break
+				}
+			}
+			if paramName != "" {
+				break
+			}
+		}
+		if paramName == "" {
+			continue // cannot determine injection point
+		}
+
+		switch phase {
+		case "get":
+			// Add to QueryParameters directly (severity "likely")
+			if existing, ok := paramMap[paramName]; ok {
+				// Merge payloads
+				exists := false
+				for _, p := range existing.Payloads {
+					if p == payload {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					existing.Payloads = append(existing.Payloads, payload)
+				}
+				// Keep severity if it's already higher
+			} else {
+				paramMap[paramName] = &Vulnerability{
+					Name:      paramName,
+					Severity:  "likely",
+					Payloads:  []string{payload},
+					Confirmed: false,
+				}
+			}
+		case "json":
+			// For JSON, we need to verify via POST with JSON body.
+			// Build the clean target URL (without the query param containing the canary)
+			cleanURL := *parsed
+			q := cleanURL.Query()
+			q.Del(paramName)
+			cleanURL.RawQuery = q.Encode()
+			cleanTarget := cleanURL.String()
+
+			// Construct JSON body: {"paramName": "payload"}
+			jsonBody := fmt.Sprintf(`{"%s":"%s"}`, paramName, payload)
+
+			// Call verifyReflection (POST)
+			if !verifyReflection(cleanTarget, "POST", nil, jsonBody, payload) {
+				continue // skip if no reflection in POST
+			}
+
+			// Add to JSONBody
+			if existing, ok := paramMap[paramName]; ok {
+				exists := false
+				for _, p := range existing.Payloads {
+					if p == payload {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					existing.Payloads = append(existing.Payloads, payload)
+				}
+				// Ensure severity is "likely"
+				if existing.Severity != "likely" {
+					existing.Severity = "likely"
+				}
+			} else {
+				paramMap[paramName] = &Vulnerability{
+					Name:      paramName,
+					Severity:  "likely",
+					Payloads:  []string{payload},
+					Confirmed: false,
+				}
+			}
+		}
+	}
+
+	// Now append the deduplicated entries to the appropriate report slice
+	if len(paramMap) > 0 {
+		targetSlice := &report.QueryParameters
+		if phase == "json" {
+			targetSlice = &report.JSONBody
+		}
+		for _, vuln := range paramMap {
+			// Check if already exists in the report (by name)
+			found := false
+			for i, existing := range *targetSlice {
+				if existing.Name == vuln.Name {
+					// Merge payloads
+					for _, p := range vuln.Payloads {
+						exists := false
+						for _, ep := range existing.Payloads {
+							if ep == p {
+								exists = true
+								break
+							}
+						}
+						if !exists {
+							(*targetSlice)[i].Payloads = append((*targetSlice)[i].Payloads, p)
+						}
+					}
+					// Upgrade severity if needed
+					if severityWeight(vuln.Severity) > severityWeight(existing.Severity) {
+						(*targetSlice)[i].Severity = vuln.Severity
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				*targetSlice = append(*targetSlice, *vuln)
+			}
+		}
+	}
+}
+
 // ── processURL ──────────────────────────────────────────────────────────────
 
 func processURL(targetURL string, index, total int) {
@@ -1311,18 +1487,23 @@ func processURL(targetURL string, index, total int) {
 					}
 				}
 			} else {
-				res, err := runCommand("nuclei", "-l", pf, "-t", canaryTemplate, "-silent")
-				if err != nil {
-					logLine("NUCLEI-ERR", X_red, "%s (%s): nuclei exited with error: %v", targetURL, pf, err)
-				} else if res == "" {
-					logLine("NUCLEI-EMPTY", X_yellow, "%s (%s): nuclei ran but returned no output", targetURL, pf)
-				}
-
-				if res != "" {
-					foundURLs := extractURLsFromNuclei(res)
-					probedCount := countLines(pf)
-					logLine("NUCLEI-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", pf, probedCount, len(foundURLs))
-					p3Findings[probePhase] = append(p3Findings[probePhase], foundURLs...)
+				// Phase 3: use curl_reflect_checker for GET and JSON probe files
+				if curlCheckerExists {
+					res, err := runCommand("./curl_reflect_checker", "-l", pf)
+					if err != nil {
+						logLine("CURLCHECK-ERR", X_red, "%s (%s): curl_reflect_checker exited with error: %v", targetURL, pf, err)
+					} else if res == "" {
+						logLine("CURLCHECK-EMPTY", X_yellow, "%s (%s): curl_reflect_checker ran but returned no output", targetURL, pf)
+					}
+					if res != "" {
+						reflectedURLs := extractReflectedURLsFromCurl(res)
+						probedCount := countLines(pf)
+						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", pf, probedCount, len(reflectedURLs))
+						p3Findings[probePhase] = append(p3Findings[probePhase], reflectedURLs...)
+					}
+				} else {
+					logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping reflection check for %s", pf)
+					// Fallback to nuclei if available? We'll skip to avoid false negatives, but we could log.
 				}
 			}
 		}
@@ -1581,23 +1762,27 @@ func processURL(targetURL string, index, total int) {
 		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-http")
 		runCommand("./x9", "-i", atkIn, "-json", "-headers", "-o", finalX9Base)
 
+		// Phase 4: use curl_reflect_checker for .get and .json attack files with -xss flag
 		exts := map[string]string{".get": "get", ".json": "json"}
 		for ext, ph := range exts {
 			atkFile := finalX9Base + ext
 			if _, statErr := os.Stat(atkFile); statErr == nil {
-				findings, err := runCommand("nuclei", "-l", atkFile, "-t", nucleiTemplate, "-silent")
-
-				if err != nil {
-					logLine("NUCLEI-ERR", X_red, "%s (%s): nuclei exited with error: %v", targetURL, atkFile, err)
-				} else if findings == "" {
-					logLine("NUCLEI-EMPTY", X_yellow, "%s (%s): nuclei ran but returned no output", targetURL, atkFile)
-				}
-
-				if findings != "" {
-					foundURLs := extractURLsFromNuclei(findings)
-					probedCount := countLines(atkFile)
-					logLine("NUCLEI-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(foundURLs))
-					report.aggregateFindings(findings, ph)
+				if curlCheckerExists {
+					res, err := runCommand("./curl_reflect_checker", "-l", atkFile, "-xss")
+					if err != nil {
+						logLine("CURLCHECK-ERR", X_red, "%s (%s): curl_reflect_checker exited with error: %v", targetURL, atkFile, err)
+					} else if res == "" {
+						logLine("CURLCHECK-EMPTY", X_yellow, "%s (%s): curl_reflect_checker ran but returned no output", targetURL, atkFile)
+					}
+					if res != "" {
+						reflectedURLs := extractReflectedURLsFromCurl(res)
+						probedCount := countLines(atkFile)
+						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(reflectedURLs))
+						// Aggregate findings into report using our new helper
+						aggregateCurlFindings(&report, reflectedURLs, ph, targetURL)
+					}
+				} else {
+					logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping Phase 4 reflection check for %s", atkFile)
 				}
 			}
 		}
@@ -1927,6 +2112,13 @@ func main() {
 		domSinkCheckerExists = true
 	} else {
 		logLine("WARN", X_yellow, "dom_sink_checker not found or not executable — DOM phases will be skipped")
+	}
+
+	// NEW: detect curl_reflect_checker
+	if _, err := exec.LookPath("./curl_reflect_checker"); err == nil {
+		curlCheckerExists = true
+	} else {
+		logLine("WARN", X_yellow, "curl_reflect_checker not found or not executable — GET/JSON reflection checks will be skipped")
 	}
 
 	loadEnv()

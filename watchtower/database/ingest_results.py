@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+\"\"\"
 ingest_results.py - Bridge Go recon pipeline results into MongoDB via db.py
 
 Usage:
@@ -7,7 +7,7 @@ Usage:
     ingest_results.py GLOBAL --workdir <path> --global
 
 Reads per-target temp directory structure and ingests findings into MongoDB.
-"""
+\"\"\"
 
 import argparse
 import json
@@ -49,14 +49,13 @@ CATEGORY_REFLECTION_MAP = {
 # ============================================================================
 
 def safe_name(s: str) -> str:
-    """Match Go's safeName function: replace non-alnum with underscore"""
+    \"\"\"Match Go's safeName function: replace non-alnum with underscore\"\"\"
     return re.sub(r'[^a-zA-Z0-9]', '_', s)
 
 
 def extract_hostname(url: str) -> Optional[str]:
-    """Extract hostname from URL for filtering"""
+    \"\"\"Extract hostname from URL for filtering\"\"\"
     try:
-        # Simple extraction without full URL parsing to avoid imports
         if '://' in url:
             url = url.split('://', 1)[1]
         if '/' in url:
@@ -69,7 +68,7 @@ def extract_hostname(url: str) -> Optional[str]:
 
 
 def parse_timestamp(ts: str) -> datetime:
-    """Parse timestamp string to datetime, fallback to now()"""
+    \"\"\"Parse timestamp string to datetime, fallback to now()\"\"\"
     try:
         return datetime.fromisoformat(ts.replace('Z', '+00:00'))
     except Exception:
@@ -77,11 +76,11 @@ def parse_timestamp(ts: str) -> datetime:
 
 
 def merge_findings_dedup(findings_list: List[Dict]) -> List[Dict]:
-    """
+    \"\"\"
     Deduplicate findings by (parameter, discovery_source, reflection_type).
     Keep highest confidence on conflict.
     This mirrors db.py's upsert_scan_findings logic.
-    """
+    \"\"\"
     confidence_weights = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
     merged = {}
     
@@ -103,7 +102,6 @@ def merge_findings_dedup(findings_list: List[Dict]) -> List[Dict]:
 # ============================================================================
 
 def read_passive_urls(workdir: Path, hostname: str) -> List[str]:
-    """Read passive/<hostname>.passive file"""
     filepath = workdir / 'passive' / f'{hostname}.passive'
     urls = []
     if filepath.exists():
@@ -116,7 +114,6 @@ def read_passive_urls(workdir: Path, hostname: str) -> List[str]:
 
 
 def read_crawled_urls(workdir: Path, hostname: str) -> List[str]:
-    """Read katana/<safe_name>-katana.txt file"""
     safe_host = safe_name(hostname)
     filepath = workdir / 'katana' / f'{safe_host}-katana.txt'
     urls = []
@@ -130,7 +127,6 @@ def read_crawled_urls(workdir: Path, hostname: str) -> List[str]:
 
 
 def read_discovered_params(workdir: Path, hostname: str) -> List[str]:
-    """Read params/<hostname>-param.txt file"""
     filepath = workdir / 'params' / f'{hostname}-param.txt'
     params = []
     if filepath.exists():
@@ -143,7 +139,6 @@ def read_discovered_params(workdir: Path, hostname: str) -> List[str]:
 
 
 def read_raw_findings(workdir: Path, hostname: str, global_mode: bool) -> List[Dict]:
-    """Read raw_findings.jsonl and filter by hostname"""
     filepath = workdir / 'raw_findings.jsonl'
     findings = []
     if not filepath.exists():
@@ -159,7 +154,6 @@ def read_raw_findings(workdir: Path, hostname: str, global_mode: bool) -> List[D
                 if global_mode:
                     findings.append(finding)
                 else:
-                    # Filter by root_domain or hostname in URL
                     root_domain = finding.get('root_domain', '')
                     url = finding.get('url', '')
                     if root_domain == hostname or hostname in url:
@@ -171,10 +165,6 @@ def read_raw_findings(workdir: Path, hostname: str, global_mode: bool) -> List[D
 
 
 def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) -> List[Dict]:
-    """
-    Read vulnerabilities/*.json files.
-    Each file is a VulnerabilityReport with query_parameters/headers/json_body/dom.
-    """
     vuln_dir = workdir / 'vulnerabilities'
     if not vuln_dir.exists():
         return []
@@ -187,25 +177,20 @@ def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) ->
             
             report_url = data.get('url', '')
             
-            # Filter by hostname (unless global mode)
             if not global_mode:
                 if hostname not in report_url:
-                    # Also check if hostname appears in the URL's host
                     try:
                         from urllib.parse import urlparse
                         parsed = urlparse(report_url)
                         if parsed.hostname != hostname and not parsed.hostname.endswith('.' + hostname):
                             continue
                     except Exception:
-                        # If we can't parse, use simple string containment
                         if hostname not in report_url:
                             continue
             
-            # Extract timestamp from file mtime
             mtime = datetime.fromtimestamp(filepath.stat().st_mtime)
             timestamp_str = mtime.isoformat()
             
-            # Process each category
             for category in ['query_parameters', 'headers', 'json_body', 'dom']:
                 vulns = data.get(category, [])
                 reflection_type = CATEGORY_REFLECTION_MAP.get(category, 'unknown')
@@ -218,7 +203,6 @@ def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) ->
                     severity = vuln.get('severity', 'possible')
                     confidence = SEVERITY_MAP.get(severity, 'LOW')
                     
-                    # If confirmed, force HIGH
                     if vuln.get('confirmed', False):
                         confidence = 'HIGH'
                     
@@ -237,17 +221,12 @@ def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) ->
                     }
                     findings.append(finding)
         except Exception as e:
-            # Log but continue
-            sys.stderr.write(f"[ingest] Error reading {filepath}: {e}\n")
+            sys.stderr.write(f"[ingest] Error reading {filepath}: {e}\\n")
     
     return findings
 
 
 def read_triage_file(workdir: Path, hostname: str) -> Dict[str, List[str]]:
-    """
-    Read triage_<safe_name>.txt and extract parameter names.
-    Returns dict of {source: [parameters]} for cross-check.
-    """
     safe_host = safe_name(hostname)
     filepath = workdir / f'triage_{safe_host}.txt'
     result = {
@@ -260,7 +239,7 @@ def read_triage_file(workdir: Path, hostname: str) -> Dict[str, List[str]]:
         return result
     
     current_section = None
-    param_pattern = re.compile(r'^([a-zA-Z0-9_\-]+)\s*\|')
+    param_pattern = re.compile(r'^([a-zA-Z0-9_\-]+)\s*\\|')
     
     with open(filepath, 'r') as f:
         for line in f:
@@ -275,7 +254,6 @@ def read_triage_file(workdir: Path, hostname: str) -> Dict[str, List[str]]:
             elif line.startswith('[HEADERS]'):
                 current_section = 'headers'
             elif current_section and line != 'none':
-                # Extract parameter name
                 match = param_pattern.match(line)
                 if match:
                     param = match.group(1)
@@ -286,7 +264,6 @@ def read_triage_file(workdir: Path, hostname: str) -> Dict[str, List[str]]:
 
 
 def normalize_finding_from_triage(param: str, source: str, refl_type: str) -> Dict:
-    """Create a finding from triage summary"""
     return {
         'parameter': param,
         'discovery_source': 'triage_summary',
@@ -303,10 +280,6 @@ def normalize_finding_from_triage(param: str, source: str, refl_type: str) -> Di
 # ============================================================================
 
 def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dict[str, int], Optional[str]]:
-    """
-    Main ingestion function.
-    Returns (stats, scan_status) or (stats, None) for global mode.
-    """
     stats = {
         'passive': 0,
         'crawled': 0,
@@ -327,7 +300,6 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
     discovered_params = read_discovered_params(workdir, hostname)
     stats['params'] = len(discovered_params)
     
-    # Dedupe
     passive_urls = list(set(passive_urls))
     crawled_urls = list(set(crawled_urls))
     discovered_params = list(set(discovered_params))
@@ -335,10 +307,8 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
     # 2. Build findings list from all sources
     all_findings = []
     
-    # Source 4: raw_findings.jsonl
     raw_findings = read_raw_findings(workdir, hostname, global_mode)
     for f in raw_findings:
-        # Convert reporter.Finding to our schema
         finding = {
             'parameter': f.get('vulnerable_parameter', ''),
             'discovery_source': f.get('discovery_source', 'unknown'),
@@ -356,16 +326,13 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             all_findings.append(finding)
     stats['findings_total'] += len(raw_findings)
     
-    # Source 5: vulnerabilities/*.json
     vuln_findings = read_vulnerability_files(workdir, hostname, global_mode)
     stats['vuln_files'] = len(vuln_findings)
     all_findings.extend(vuln_findings)
     
-    # Source 6: triage file (fallback for missed parameters)
     triage_data = read_triage_file(workdir, hostname)
     existing_params = {f.get('parameter', '') for f in all_findings}
     
-    # Check GET params from triage
     for param in triage_data.get('get_params', []):
         if param not in existing_params:
             all_findings.append(normalize_finding_from_triage(
@@ -373,7 +340,6 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             ))
             stats['triage_only'] += 1
     
-    # Check DOM params from triage
     for param in triage_data.get('dom_params', []):
         if param not in existing_params:
             all_findings.append(normalize_finding_from_triage(
@@ -381,7 +347,6 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             ))
             stats['triage_only'] += 1
     
-    # Check Headers from triage
     for param in triage_data.get('headers', []):
         if param not in existing_params:
             all_findings.append(normalize_finding_from_triage(
@@ -389,15 +354,12 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             ))
             stats['triage_only'] += 1
     
-    # Deduplicate findings
     all_findings = merge_findings_dedup(all_findings)
     stats['findings_ingested'] = len(all_findings)
     
-    # 3. Global mode: just print summary
     if global_mode:
         return stats, None
     
-    # 4. Normal mode: upsert to MongoDB
     if passive_urls or crawled_urls or discovered_params:
         upsert_scan_artifacts(
             hostname,
@@ -406,12 +368,10 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
             discovered_params=discovered_params if discovered_params else None
         )
     
-    # Only call upsert_scan_findings if we have findings
     if all_findings:
-
-        upsert_scan_findings(hostname, all_findings, scan_status="pending")
+        # CHANGED: The signature for upsert_scan_findings no longer includes scan_status
+        upsert_scan_findings(hostname, all_findings)
         
-        # Determine scan_status for summary (simplified)
         high_count = sum(1 for f in all_findings if f.get('confidence', '').upper() == 'HIGH')
         if high_count > 0:
             scan_status = 'confirmed_vuln'
@@ -451,13 +411,12 @@ def main():
     
     workdir = Path(args.workdir)
     if not workdir.exists():
-        sys.stderr.write(f"[ingest] Error: workdir {workdir} does not exist\n")
-        sys.exit(0)  # Don't fail the pipeline
+        sys.stderr.write(f"[ingest] Error: workdir {workdir} does not exist\\n")
+        sys.exit(0)
     
     try:
         stats, scan_status = ingest_results(args.hostname, workdir, args.global_mode)
         
-        # Print summary line
         if args.global_mode:
             print(f"[ingest] GLOBAL: total_findings={stats['findings_total']} "
                   f"(vuln_files={stats['vuln_files']})")
@@ -473,8 +432,7 @@ def main():
                   f"-> scan_status={status_str}")
         
     except Exception as e:
-        # Never raise past main, just log and exit cleanly
-        sys.stderr.write(f"[ingest] Error: {e}\n")
+        sys.stderr.write(f"[ingest] Error: {e}\\n")
         sys.exit(0)
 
 
