@@ -792,6 +792,7 @@ var (
 	forceAll             bool
 	concurrency          int
 	workers              int
+	fastWorkers          int // NEW: concurrency for the fast HTTP-reflection pipeline (-fast-workers)
 	mu                   sync.Mutex
 	tg                   *Telegram
 	allCrawledURLs       []string
@@ -1342,13 +1343,59 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 	}
 }
 
-// ── processURL ──────────────────────────────────────────────────────────────
+// ── ProbeArtifacts ────────────────────────────────────────────────────────
+//
+// ProbeArtifacts carries everything the slow DOM/headless pipeline needs
+// from the fast HTTP-reflection pipeline for a single target, so the two
+// pipelines can be scheduled independently (different worker pools, no
+// blocking between them) while still cooperating on producing one coherent
+// picture per URL (e.g. the combined -phase 3 triage file).
+type ProbeArtifacts struct {
+	TargetURL string
+	Index     int
+	Total     int
 
-func processURL(targetURL string, index, total int) {
+	Profile     TechProfile
+	HasJS       bool
+	TargetAlive bool
+
+	ProbeOutputBase   string // base path for x9 -probe output (…-probe-out); DOM stage reads ProbeOutputBase+".dom.canary"
+	DomQueryProbeFile string // path to the dom-query-probe.txt file generated in Phase 2
+
+	// TriageOnly is set when running with -phase 3: the fast pipeline stops
+	// after its own Phase 3 work and hands off just enough data for the DOM
+	// pipeline to write the single combined triage_<target>.txt file once its
+	// own (DOM) Phase 3 work finishes.
+	TriageOnly       bool
+	GetParamSet      map[string]bool
+	GetReflectedRaw  []string // raw reflected URLs from curl_reflect_checker (phase "get"), used to recompute break_chars for triage
+	CandidateHeaders []string
+
+	// Skip tells the DOM pipeline there is nothing further to do for this
+	// target: unparseable URL, duplicate (workerLock already held), SPA-skip,
+	// generic-reflector-skip, or a -phase < 3 run that only wanted probe
+	// files generated. Targets with Skip=true are never enqueued to the DOM
+	// pipeline at all (see main()), but the field is kept for safety/clarity.
+	Skip bool
+}
+
+// ── processURLFast (HTTP reflection pipeline: GET/JSON/header) ─────────────
+//
+// processURLFast handles everything that is pure HTTP request/response work:
+// probe file generation (Phase 2), GET/JSON/header reflection checks via
+// curl_reflect_checker (Phase 3), confirmation (Phase 4b) and the heavy
+// GET/JSON/header attack (Phase 4). It notifies/logs its own findings the
+// moment they're ready and returns a ProbeArtifacts struct so the DOM/
+// headless pipeline (processURLDom) can pick up where it left off,
+// completely decoupled from this pipeline's own scheduling.
+func processURLFast(targetURL string, index, total int) ProbeArtifacts {
+	art := ProbeArtifacts{TargetURL: targetURL, Index: index, Total: total}
+
 	uParsed, err := url.Parse(targetURL)
 	if err != nil || uParsed == nil {
 		logLine("SKIP", X_yellow, "unparseable URL, skipping: %s", targetURL)
-		return
+		art.Skip = true
+		return art
 	}
 	normalizedLockURL := targetURL
 	uParsed.Path = strings.TrimSuffix(uParsed.Path, "/")
@@ -1361,7 +1408,8 @@ func processURL(targetURL string, index, total int) {
 	normalizedLockURL = uParsed.String()
 
 	if _, loaded := workerLock.LoadOrStore(normalizedLockURL, true); loaded {
-		return
+		art.Skip = true
+		return art
 	}
 
 	atomic.AddInt64(&processedTargets, 1)
@@ -1372,17 +1420,20 @@ func processURL(targetURL string, index, total int) {
 
 	if !skipSPA && spadetect.IsSPA(targetURL) {
 		logLine("SKIP", X_yellow, "SPA/React detected, skipping heavy scan for %s", targetURL)
-		return
+		art.Skip = true
+		return art
 	}
 
 	if isGenericReflector(targetURL) {
 		logLine("SKIP", X_yellow, "Generic reflector detected, skipping %s", targetURL)
-		return
+		art.Skip = true
+		return art
 	}
 
 	// Tech-Aware Profile Classification (for Header Injection only)
 	techListStr := strings.Split(techFlag, ",")
 	profile := classifyTechProfile(techListStr)
+	art.Profile = profile
 
 	report := VulnerabilityReport{URL: targetURL}
 
@@ -1391,16 +1442,20 @@ func processURL(targetURL string, index, total int) {
 	os.WriteFile(probeInput, []byte(targetURL), 0644)
 
 	probeOutputBase := filepath.Join(outputDir, safeName(targetURL)+"-probe-out")
+	art.ProbeOutputBase = probeOutputBase
 
-	args := []string{"-probe", "-json", "-headers", "-dom"}
+	xArgs := []string{"-probe", "-json", "-headers", "-dom"}
 	if uParsed.RawQuery != "" {
-		args = append(args, "-strict")
+		xArgs = append(xArgs, "-strict")
 	}
-	args = append(args, "-i", probeInput, "-o", probeOutputBase)
-	runCommand("./x9", args...)
+	xArgs = append(xArgs, "-i", probeInput, "-o", probeOutputBase)
+	runCommand("./x9", xArgs...)
 
-	// Phase 2: Canary Probing - DOM query params
+	// Phase 2: Canary Probing - DOM query params. NOTE: only the probe FILE
+	// is generated here; the actual dom_sink_checker execution against it
+	// happens in the DOM/headless pipeline (processURLDom).
 	domQueryProbeFile := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-probe.txt")
+	art.DomQueryProbeFile = domQueryProbeFile
 	paramsToProbe := []string{}
 	if paramFile != "" {
 		if pf, err := os.Open(paramFile); err == nil {
@@ -1443,10 +1498,11 @@ func processURL(targetURL string, index, total int) {
 	logLine("PHASE2", X_gray, "probe files generated for %s", targetURL)
 
 	if phase < 3 {
-		return
+		art.Skip = true
+		return art
 	}
 
-	// Phase 3: Filter Vulnerable Parameters
+	// Phase 3: Filter Vulnerable Parameters (HTTP-only: GET/JSON/header)
 	targetAlive := isTargetAlive(targetURL)
 	var hasJS bool
 	if targetAlive {
@@ -1461,18 +1517,19 @@ func processURL(targetURL string, index, total int) {
 			}
 		}
 	}
+	art.TargetAlive = targetAlive
+	art.HasJS = hasJS
 
+	// NOTE: the ".dom.canary" probe file is intentionally NOT processed here
+	// anymore — that dom_sink_checker call now happens in processURLDom.
 	probeFiles := map[string]string{
-		probeOutputBase + ".get":        "get",
-		probeOutputBase + ".json":       "json",
-		probeOutputBase + ".header":     "header",
-		probeOutputBase + ".dom.canary": "dom",
+		probeOutputBase + ".get":    "get",
+		probeOutputBase + ".json":   "json",
+		probeOutputBase + ".header": "header",
 	}
 
 	p3Findings := make(map[string][]string)
 	candidateHeaders := []string{}
-
-	domProbeSkippedAll := false
 
 	for pf, probePhase := range probeFiles {
 		if _, err := os.Stat(pf); err == nil {
@@ -1522,38 +1579,6 @@ func processURL(targetURL string, index, total int) {
 				}
 				file.Close()
 
-			} else if probePhase == "dom" {
-				// TECH-AWARE: Skip DOM sink if absolutely no JS exists on page
-				if !hasJS && !forceAll {
-					logLine("SKIP-NOJS", X_cyan, "Skipping DOM checks for %s: no <script> tags detected in page", targetURL)
-					domProbeSkippedAll = true
-					continue
-				}
-
-				if !targetAlive {
-					domProbeSkippedAll = true
-					continue
-				}
-
-				if domSinkCheckerExists {
-					res, err := runCommand("./dom_sink_checker", "-l", pf)
-					if err != nil {
-						logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, pf, err)
-					} else if res == "" {
-						logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, pf)
-					}
-
-					if res != "" {
-						lines := strings.Split(strings.TrimSpace(res), "\n")
-						for _, l := range lines {
-							l = strings.TrimSpace(l)
-							var probe DomSinkOutput
-							if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
-								p3Findings["dom"] = append(p3Findings["dom"], l)
-							}
-						}
-					}
-				}
 			} else {
 				// Phase 3: use curl_reflect_checker for GET and JSON probe files
 				if curlCheckerExists {
@@ -1571,44 +1596,9 @@ func processURL(targetURL string, index, total int) {
 					}
 				} else {
 					logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping reflection check for %s", pf)
-					// Fallback to nuclei if available? We'll skip to avoid false negatives, but we could log.
 				}
 			}
 		}
-	}
-
-	// DOM query probe
-	if _, err := os.Stat(domQueryProbeFile); err == nil {
-		if !hasJS && !forceAll {
-			logLine("SKIP-NOJS", X_cyan, "Skipping DOM query sink checker for %s: no <script> tags detected in page", targetURL)
-			if !targetAlive {
-				domProbeSkippedAll = true
-			}
-		} else if !targetAlive {
-			domProbeSkippedAll = true
-		} else if domSinkCheckerExists {
-			res, err := runCommand("./dom_sink_checker", "-l", domQueryProbeFile)
-			if err != nil {
-				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, domQueryProbeFile, err)
-			} else if res == "" {
-				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, domQueryProbeFile)
-			}
-
-			if res != "" {
-				lines := strings.Split(strings.TrimSpace(res), "\n")
-				for _, l := range lines {
-					l = strings.TrimSpace(l)
-					var probe DomSinkOutput
-					if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
-						p3Findings["dom"] = append(p3Findings["dom"], l)
-					}
-				}
-			}
-		}
-	}
-
-	if domProbeSkippedAll && (fileExists(probeOutputBase+".dom.canary") || fileExists(domQueryProbeFile)) {
-		logLine("DEAD", X_yellow, "%s", targetURL)
 	}
 
 	getParamSet := make(map[string]bool)
@@ -1626,11 +1616,16 @@ func processURL(targetURL string, index, total int) {
 	}
 	sort.Strings(getParams)
 
-	domCount := len(p3Findings["dom"])
 	headers := candidateHeaders
 	sort.Strings(headers)
 
-	if len(getParamSet) > 0 || domCount > 0 || len(headers) > 0 {
+	// Hand off everything the DOM pipeline needs for the combined -phase 3
+	// triage output, regardless of what phase we're running at.
+	art.GetParamSet = getParamSet
+	art.GetReflectedRaw = append([]string(nil), p3Findings["get"]...)
+	art.CandidateHeaders = append([]string(nil), headers...)
+
+	if len(getParamSet) > 0 || len(headers) > 0 {
 		paramsStr := strings.Join(getParams, ", ")
 		if paramsStr == "" {
 			paramsStr = "none"
@@ -1639,112 +1634,27 @@ func processURL(targetURL string, index, total int) {
 		if headersStr == "" {
 			headersStr = "none"
 		}
-		logLine("HIT", X_green, "%s → params: %s | dom: %d | headers: %s", targetURL, paramsStr, domCount, headersStr)
+		logLine("HIT-HTTP", X_green, "%s → params: %s | headers: %s", targetURL, paramsStr, headersStr)
 	} else {
-		logLine("CLEAN", X_gray, "%s", targetURL)
+		logLine("CLEAN-HTTP", X_gray, "%s", targetURL)
 	}
 
 	if phase == 3 {
-		var triageContent strings.Builder
-		triageContent.WriteString(fmt.Sprintf("TARGET: %s\n", targetURL))
-		triageContent.WriteString(fmt.Sprintf("SCANNED: %s\n\n", time.Now().Format(time.RFC3339)))
-
-		triageContent.WriteString("[GET PARAMS]\n")
-		if len(getParamSet) == 0 {
-			triageContent.WriteString("none\n\n")
-		} else {
-			paramBreaks := make(map[string]map[string]bool)
-			for p := range getParamSet {
-				paramBreaks[p] = make(map[string]bool)
-			}
-			for _, u := range p3Findings["get"] {
-				parsed, err := url.Parse(u)
-				if err != nil {
-					continue
-				}
-				for param, values := range parsed.Query() {
-					if _, ok := getParamSet[param]; ok {
-						for _, val := range values {
-							breaks := extractBreakChars(val)
-							for _, b := range breaks {
-								paramBreaks[param][b] = true
-							}
-						}
-					}
-				}
-			}
-			for _, param := range getParams {
-				breaks := []string{}
-				for b := range paramBreaks[param] {
-					breaks = append(breaks, b)
-				}
-				sort.Strings(breaks)
-				if len(breaks) == 0 {
-					triageContent.WriteString(fmt.Sprintf("%s | break_chars: \n", param))
-				} else {
-					triageContent.WriteString(fmt.Sprintf("%s | break_chars: %s\n", param, strings.Join(breaks, ", ")))
-				}
-			}
-			triageContent.WriteString("\n")
-		}
-
-		triageContent.WriteString("[DOM CANARY]\n")
-		if domCount == 0 {
-			triageContent.WriteString("none\n\n")
-		} else {
-			for _, line := range p3Findings["dom"] {
-				var domOut DomSinkOutput
-				if err := json.Unmarshal([]byte(line), &domOut); err == nil {
-					sinksStr := strings.Join(domOut.Sinks, ", ")
-					triageContent.WriteString(fmt.Sprintf("%s | sinks: %s\n", domOut.URL, sinksStr))
-				} else {
-					triageContent.WriteString(line + "\n")
-				}
-			}
-			triageContent.WriteString("\n")
-		}
-
-		triageContent.WriteString("[HEADERS]\n")
-		if len(headers) == 0 {
-			triageContent.WriteString("none\n\n")
-		} else {
-			for _, h := range headers {
-				triageContent.WriteString(h + "\n")
-			}
-			triageContent.WriteString("\n")
-		}
-
-		triageFileName := filepath.Join(outputDir, "triage_"+safeName(targetURL)+".txt")
-		if err := os.WriteFile(triageFileName, []byte(triageContent.String()), 0644); err != nil {
-			logLine("ERROR", X_red, "Failed to write triage file: %v", err)
-		}
-
-		triageMu.Lock()
-		triageEntries = append(triageEntries, TriageEntry{
-			TargetURL:    targetURL,
-			ParamsCount:  len(getParamSet),
-			DomCount:     domCount,
-			HeadersCount: len(headers),
-		})
-		triageMu.Unlock()
-
-		return
+		art.TriageOnly = true
+		return art
 	}
 
 	if len(p3Findings) == 0 && len(candidateHeaders) == 0 {
-		return
+		return art
 	}
 
-	// Phase 4b: Triage & Context Confirmation
+	// Phase 4b: Triage & Context Confirmation (GET/JSON/header only)
 	confirmedParams := make(map[string]map[string]bool)
 	for p := range p3Findings {
 		confirmedParams[p] = make(map[string]bool)
 	}
 
 	for probePhase, urls := range p3Findings {
-		if probePhase == "dom" {
-			continue
-		}
 		tempRep := VulnerabilityReport{URL: targetURL}
 		dummy := ""
 		for _, u := range urls {
@@ -1789,12 +1699,9 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 
-	// Phase 4: Heavy Attack
+	// Phase 4: Heavy Attack (HTTP: GET/JSON/header)
 	httpAtkUrls := []string{}
 	for probePhase, urls := range p3Findings {
-		if probePhase == "dom" {
-			continue
-		}
 		for _, u := range urls {
 			uParsedAtk, _ := url.Parse(u)
 			if uParsedAtk == nil {
@@ -1919,6 +1826,117 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 
+	// GET/JSON/header findings are fully determined at this point — report
+	// and notify them immediately, without waiting for this URL's DOM check.
+	if report.HasVulns() {
+		tg.notify(report)
+	}
+	logReportFindings(&report)
+
+	return art
+}
+
+// ── processURLDom (DOM/headless pipeline) ──────────────────────────────────
+//
+// processURLDom handles everything that shells out to dom_sink_checker
+// (spins up headless Chrome): the DOM canary probe, the DOM query probe, and
+// the DOM fragment/query attacks. It is scheduled on its own low-concurrency
+// worker pool (sized by -w) completely independently of processURLFast's
+// pool (sized by -fast-workers), so a backlog of slow DOM checks never
+// blocks the fast pipeline from racing through the rest of the URL list.
+func processURLDom(art ProbeArtifacts) VulnerabilityReport {
+	report := VulnerabilityReport{URL: art.TargetURL}
+
+	if art.Skip {
+		return report
+	}
+
+	targetURL := art.TargetURL
+	hasJS := art.HasJS
+	targetAlive := art.TargetAlive
+
+	p3Findings := make(map[string][]string)
+	domProbeSkippedAll := false
+
+	// Phase 3 DOM: canary probe file (x9 -dom output)
+	domCanaryFile := art.ProbeOutputBase + ".dom.canary"
+	if _, err := os.Stat(domCanaryFile); err == nil {
+		if !hasJS && !forceAll {
+			logLine("SKIP-NOJS", X_cyan, "Skipping DOM checks for %s: no <script> tags detected in page", targetURL)
+			domProbeSkippedAll = true
+		} else if !targetAlive {
+			domProbeSkippedAll = true
+		} else if domSinkCheckerExists {
+			res, err := runCommand("./dom_sink_checker", "-l", domCanaryFile)
+			if err != nil {
+				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, domCanaryFile, err)
+			} else if res == "" {
+				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, domCanaryFile)
+			}
+
+			if res != "" {
+				lines := strings.Split(strings.TrimSpace(res), "\n")
+				for _, l := range lines {
+					l = strings.TrimSpace(l)
+					var probe DomSinkOutput
+					if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
+						p3Findings["dom"] = append(p3Findings["dom"], l)
+					}
+				}
+			}
+		}
+	}
+
+	// Phase 3 DOM: query probe file
+	if _, err := os.Stat(art.DomQueryProbeFile); err == nil {
+		if !hasJS && !forceAll {
+			logLine("SKIP-NOJS", X_cyan, "Skipping DOM query sink checker for %s: no <script> tags detected in page", targetURL)
+			if !targetAlive {
+				domProbeSkippedAll = true
+			}
+		} else if !targetAlive {
+			domProbeSkippedAll = true
+		} else if domSinkCheckerExists {
+			res, err := runCommand("./dom_sink_checker", "-l", art.DomQueryProbeFile)
+			if err != nil {
+				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, art.DomQueryProbeFile, err)
+			} else if res == "" {
+				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, art.DomQueryProbeFile)
+			}
+
+			if res != "" {
+				lines := strings.Split(strings.TrimSpace(res), "\n")
+				for _, l := range lines {
+					l = strings.TrimSpace(l)
+					var probe DomSinkOutput
+					if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
+						p3Findings["dom"] = append(p3Findings["dom"], l)
+					}
+				}
+			}
+		}
+	}
+
+	if domProbeSkippedAll && (fileExists(domCanaryFile) || fileExists(art.DomQueryProbeFile)) {
+		logLine("DEAD", X_yellow, "%s", targetURL)
+	}
+
+	domCount := len(p3Findings["dom"])
+	if domCount > 0 {
+		logLine("HIT-DOM", X_green, "%s → dom: %d", targetURL, domCount)
+	} else {
+		logLine("CLEAN-DOM", X_gray, "%s", targetURL)
+	}
+
+	if art.TriageOnly {
+		writeTriageFile(art, p3Findings, domCount)
+		return report
+	}
+
+	if domCount == 0 {
+		return report
+	}
+
 	// Phase 4 DOM: fragment URLs
 	var fragmentURLs []string
 	for _, line := range p3Findings["dom"] {
@@ -2001,10 +2019,115 @@ func processURL(targetURL string, index, total int) {
 		}
 	}
 
+	// DOM findings are fully determined at this point — report/notify them
+	// as their own follow-up entry for this URL, independent of whatever the
+	// fast pipeline already reported earlier.
 	if report.HasVulns() {
 		tg.notify(report)
 	}
 	logReportFindings(&report)
+
+	return report
+}
+
+// writeTriageFile reproduces the original combined -phase 3
+// triage_<target>.txt output (GET params + DOM canary + headers) once the
+// DOM pipeline's own Phase 3 work for this URL has finished. It's called
+// from processURLDom using the fast-stage data handed off via ProbeArtifacts.
+func writeTriageFile(art ProbeArtifacts, p3FindingsDom map[string][]string, domCount int) {
+	targetURL := art.TargetURL
+	getParamSet := art.GetParamSet
+
+	getParams := make([]string, 0, len(getParamSet))
+	for k := range getParamSet {
+		getParams = append(getParams, k)
+	}
+	sort.Strings(getParams)
+
+	headers := art.CandidateHeaders
+
+	var triageContent strings.Builder
+	triageContent.WriteString(fmt.Sprintf("TARGET: %s\n", targetURL))
+	triageContent.WriteString(fmt.Sprintf("SCANNED: %s\n\n", time.Now().Format(time.RFC3339)))
+
+	triageContent.WriteString("[GET PARAMS]\n")
+	if len(getParamSet) == 0 {
+		triageContent.WriteString("none\n\n")
+	} else {
+		paramBreaks := make(map[string]map[string]bool)
+		for p := range getParamSet {
+			paramBreaks[p] = make(map[string]bool)
+		}
+		for _, u := range art.GetReflectedRaw {
+			parsed, err := url.Parse(u)
+			if err != nil {
+				continue
+			}
+			for param, values := range parsed.Query() {
+				if _, ok := getParamSet[param]; ok {
+					for _, val := range values {
+						breaks := extractBreakChars(val)
+						for _, b := range breaks {
+							paramBreaks[param][b] = true
+						}
+					}
+				}
+			}
+		}
+		for _, param := range getParams {
+			breaks := []string{}
+			for b := range paramBreaks[param] {
+				breaks = append(breaks, b)
+			}
+			sort.Strings(breaks)
+			if len(breaks) == 0 {
+				triageContent.WriteString(fmt.Sprintf("%s | break_chars: \n", param))
+			} else {
+				triageContent.WriteString(fmt.Sprintf("%s | break_chars: %s\n", param, strings.Join(breaks, ", ")))
+			}
+		}
+		triageContent.WriteString("\n")
+	}
+
+	triageContent.WriteString("[DOM CANARY]\n")
+	if domCount == 0 {
+		triageContent.WriteString("none\n\n")
+	} else {
+		for _, line := range p3FindingsDom["dom"] {
+			var domOut DomSinkOutput
+			if err := json.Unmarshal([]byte(line), &domOut); err == nil {
+				sinksStr := strings.Join(domOut.Sinks, ", ")
+				triageContent.WriteString(fmt.Sprintf("%s | sinks: %s\n", domOut.URL, sinksStr))
+			} else {
+				triageContent.WriteString(line + "\n")
+			}
+		}
+		triageContent.WriteString("\n")
+	}
+
+	triageContent.WriteString("[HEADERS]\n")
+	if len(headers) == 0 {
+		triageContent.WriteString("none\n\n")
+	} else {
+		for _, h := range headers {
+			triageContent.WriteString(h + "\n")
+		}
+		triageContent.WriteString("\n")
+	}
+
+	triageFileName := filepath.Join(outputDir, "triage_"+safeName(targetURL)+".txt")
+	if err := os.WriteFile(triageFileName, []byte(triageContent.String()), 0644); err != nil {
+		logLine("ERROR", X_red, "Failed to write triage file: %v", err)
+	}
+
+	triageMu.Lock()
+	triageEntries = append(triageEntries, TriageEntry{
+		TargetURL:    targetURL,
+		ParamsCount:  len(getParamSet),
+		DomCount:     domCount,
+		HeadersCount: len(headers),
+	})
+	triageMu.Unlock()
 }
 
 // ── Helper: safe name for file naming ──────────────────────────────────────
@@ -2146,7 +2269,8 @@ func main() {
 	flag.StringVar(&techFlag, "tech", "", "Comma-separated list of technologies")
 	flag.BoolVar(&forceAll, "force-all", false, "Disable tech-aware skipping logic")
 	flag.IntVar(&concurrency, "c", 10, "x9 concurrency")
-	flag.IntVar(&workers, "w", 3, "Parallel workers")
+	flag.IntVar(&workers, "w", 3, "Parallel workers (DOM/headless pipeline concurrency)")
+	flag.IntVar(&fastWorkers, "fast-workers", 15, "Fast HTTP-reflection pipeline concurrency")
 	flag.IntVar(&maxURLsPerTarget, "max-urls", 50, "Max URLs per target")
 	flag.BoolVar(&allowWildcards, "allow-wildcards", false, "Allow wildcard URLs")
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
@@ -2294,23 +2418,61 @@ func main() {
 
 	allCrawledURLs = append(allCrawledURLs, urls...)
 
-	sem := make(chan struct{}, workers)
-	var wg sync.WaitGroup
+	// Two independently-scheduled pipelines against the same URL list:
+	//   - fast pool (-fast-workers): probe gen + GET/JSON/header reflection
+	//   - dom pool (-w): DOM/headless checks (dom_sink_checker, heavy on RAM/CPU)
+	// The fast pool never blocks on the dom pool: as soon as processURLFast
+	// returns artifacts for a URL, it's handed off via artifactsChan and the
+	// fast worker immediately moves on to the next URL. A dispatcher
+	// goroutine fans artifacts out to dom workers gated by their own
+	// concurrency limit.
+	fastSem := make(chan struct{}, fastWorkers)
+	domSem := make(chan struct{}, workers)
+	var fastWg sync.WaitGroup
+	var domWg sync.WaitGroup
+	artifactsChan := make(chan ProbeArtifacts, len(urls))
+	dispatcherDone := make(chan struct{})
+
+	go func() {
+		for art := range artifactsChan {
+			domWg.Add(1)
+			domSem <- struct{}{}
+			go func(a ProbeArtifacts) {
+				defer domWg.Done()
+				defer func() { <-domSem }()
+				defer func() {
+					if r := recover(); r != nil {
+						logLine("ERROR", X_red, "panic processing DOM stage for %s: %v", a.TargetURL, r)
+					}
+				}()
+				processURLDom(a)
+			}(art)
+		}
+		close(dispatcherDone)
+	}()
+
 	for i, u := range urls {
-		wg.Add(1)
-		sem <- struct{}{}
+		fastWg.Add(1)
+		fastSem <- struct{}{}
 		go func(target string, idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
+			defer fastWg.Done()
+			defer func() { <-fastSem }()
 			defer func() {
 				if r := recover(); r != nil {
 					logLine("ERROR", X_red, "panic processing %s: %v", target, r)
 				}
 			}()
-			processURL(target, idx+1, len(urls))
+			art := processURLFast(target, idx+1, len(urls))
+			if art.Skip {
+				return
+			}
+			artifactsChan <- art
 		}(u, i)
 	}
-	wg.Wait()
+	fastWg.Wait()
+	close(artifactsChan)
+	<-dispatcherDone
+	domWg.Wait()
 
 	if phase == 3 {
 		triageMu.Lock()
