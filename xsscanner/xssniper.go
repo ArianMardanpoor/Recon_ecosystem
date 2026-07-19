@@ -82,6 +82,10 @@ func hasClientSideJSRisk(targetURL string) bool {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; xssniper)")
 
+	// FIX BUG1: Cache-Busting headers
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Pragma", "no-cache")
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return true
@@ -940,6 +944,16 @@ func isGenericReflector(targetURL string) bool {
 	q.Set("xprobe3", "CANARY_C")
 	q.Set("xprobe4", "CANARY_D")
 	q.Set("xprobe5", "CANARY_E")
+
+	// FIX BUG1: Cache-Busting param for isGenericReflector
+	cbName := "_cb"
+	_, exists := q[cbName]
+	for exists {
+		cbName = "_cb" + randomString(3)
+		_, exists = q[cbName]
+	}
+	q.Set(cbName, fmt.Sprintf("%d_%s", time.Now().UnixNano(), randomString(4)))
+
 	u.RawQuery = q.Encode()
 	finalURL := u.String()
 
@@ -956,6 +970,11 @@ func isGenericReflector(targetURL string) bool {
 	if err != nil {
 		return false
 	}
+
+	// FIX BUG1: Cache-Busting headers
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Pragma", "no-cache")
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
@@ -1035,15 +1054,34 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 	// ۲. استفاده از کلاینت مدیریت‌شده (همراه با Proxy چرخشی و Timeout)
 	client := ratelimit.GetHTTPClient(targetURL)
 
+	finalURL := targetURL
+
+	// FIX BUG1: Cache-Busting param for GET requests in reflection check
+	if method == "GET" {
+		if u, err := url.Parse(targetURL); err == nil {
+			q := u.Query()
+			cbName := "_cb"
+			_, exists := q[cbName]
+			for exists {
+				cbName = "_cb" + randomString(3)
+				_, exists = q[cbName]
+			}
+			cbValue := fmt.Sprintf("%d_%s", time.Now().UnixNano(), randomString(4))
+			q.Set(cbName, cbValue)
+			u.RawQuery = q.Encode()
+			finalURL = u.String()
+		}
+	}
+
 	var req *http.Request
 	var err error
 	if method == "POST" {
-		req, err = http.NewRequest("POST", targetURL, strings.NewReader(body))
+		req, err = http.NewRequest("POST", finalURL, strings.NewReader(body))
 		if err == nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
 	} else {
-		req, err = http.NewRequest("GET", targetURL, nil)
+		req, err = http.NewRequest("GET", finalURL, nil)
 	}
 	if err != nil || req == nil {
 		return false
@@ -1051,6 +1089,10 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+
+	// FIX BUG1: Cache-Busting headers
+	req.Header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	req.Header.Set("Pragma", "no-cache")
 
 	resp, err := client.Do(req)
 	if err != nil {
