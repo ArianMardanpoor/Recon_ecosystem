@@ -5,6 +5,13 @@
 // Behaviour mirrors nuclei's canary_matcher.yaml / xss_template_v2.yaml
 // matchers but uses curl (OpenSSL/libcurl TLS stack) so that WAFs that
 // block Go's net/http JA3 no longer cause false negatives.
+//
+// PATCH (retry-on-timeout): some targets take longer than the configured
+// --max-time to respond (observed ~7-8s baseline against a live target,
+// worse under concurrent worker-pool load). A single curl timeout (exit 28)
+// or status 000 used to be silently logged and treated as "no reflection",
+// causing false negatives on real, confirmed vulnerabilities. checkURL now
+// retries once with a doubled timeout before giving up on a URL.
 package main
 
 import (
@@ -43,7 +50,6 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 
 // DomSinkOutput matches the struct used elsewhere in the codebase so
 // downstream JSON-line parsing does not need to change.
-// FIX BUG4: Added StatusCode field for visibility into HTTP response codes.
 type DomSinkOutput struct {
 	URL        string   `json:"url"`
 	Sinks      []string `json:"sinks"`
@@ -59,7 +65,7 @@ type checkOpts struct {
 func main() {
 	listFile := flag.String("l", "", "input file with one URL per line (use - for stdin)")
 	xssMode := flag.Bool("xss", false, "search for break-char pattern instead of plain canary")
-	timeout := flag.Int("timeout", 15, "per-request curl timeout in seconds")
+	timeout := flag.Int("timeout", 20, "per-request curl timeout in seconds (retried once at 2x on failure)")
 	concurrency := flag.Int("c", 5, "number of concurrent curl processes")
 	flag.Parse()
 
@@ -126,6 +132,51 @@ func main() {
 	}
 }
 
+// curlAttempt issues a single curl request with the given per-attempt
+// timeout and returns the HTTP status code and response body.
+func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err error) {
+	args := []string{
+		"-s",
+		"-L",
+		"--max-time", strconv.Itoa(timeoutSec),
+		"-A", userAgent,
+		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+		"-H", "Accept-Language: en-US,en;q=0.9",
+		"-w", "\nHTTPSTATUS:%{http_code}",
+		rawURL,
+	}
+
+	// Give curl a grace period beyond its own --max-time before
+	// killing the process at the Go level (defensive).
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(timeoutSec+10)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "curl", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	stdout, cmdErr := cmd.Output()
+	if cmdErr != nil {
+		return 0, nil, cmdErr
+	}
+
+	marker := []byte("\nHTTPSTATUS:")
+	idx := bytes.LastIndex(stdout, marker)
+	if idx < 0 {
+		return 0, nil, fmt.Errorf("no HTTPSTATUS marker in output")
+	}
+
+	respBody := stdout[:idx]
+	statusStr := strings.TrimSpace(string(stdout[idx+len(marker):]))
+	statusCode, convErr := strconv.Atoi(statusStr)
+	if convErr != nil {
+		return 0, respBody, fmt.Errorf("unparseable HTTP status %q", statusStr)
+	}
+
+	return statusCode, respBody, nil
+}
+
 func checkURL(rawURL string, opts checkOpts) {
 	// Extract the payload substring from the URL so we know what to
 	// search for in the response body (same approach as xssniper.go).
@@ -134,59 +185,34 @@ func checkURL(rawURL string, opts checkOpts) {
 		return
 	}
 
-	args := []string{
-		"-s",
-		"-L",
-		"--max-time", strconv.Itoa(opts.timeout),
-		"-A", userAgent,
-		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-		"-H", "Accept-Language: en-US,en;q=0.9",
-		"-w", "\\nHTTPSTATUS:%{http_code}",
-		rawURL,
-	}
+	// First attempt at the configured timeout.
+	status, body, err := curlAttempt(rawURL, opts.timeout)
 
-	// Give curl a grace period beyond its own --max-time before
-	// killing the process at the Go level (defensive).
-	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(opts.timeout+10)*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "curl", args...)
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	stdout, err := cmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: %v\n", rawURL, err)
-		return
-	}
-
-	// Split off the trailing  \nHTTPSTATUS:<code>  marker that curl's
-	// -w appends to stdout.
-	marker := []byte("\nHTTPSTATUS:")
-	idx := bytes.LastIndex(stdout, marker)
-	if idx < 0 {
-		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTPSTATUS marker in output\n", rawURL)
-		return
-	}
-
-	body := stdout[:idx]
-	statusStr := strings.TrimSpace(string(stdout[idx+len(marker):]))
-	status, err := strconv.Atoi(statusStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: unparseable HTTP status %q\n", rawURL, statusStr)
-		return
+	// PATCH: if the first attempt hard-failed (curl error / timeout /
+	// status 0), retry once with a doubled timeout instead of giving up
+	// immediately. This is what silently swallowed real reflections against
+	// a slow-but-live target: the server can take ~7-8s to respond, which
+	// sits right at the edge of what a tight --max-time can absorb once
+	// concurrent workers add queueing delay.
+	if err != nil || status == 0 {
+		retryTimeout := opts.timeout * 2
+		status, body, err = curlAttempt(rawURL, retryTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s after retry (timeout=%ds then %ds): %v\n",
+				rawURL, opts.timeout, retryTimeout, err)
+			return
+		}
 	}
 
 	if status == 0 {
-		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000)\n", rawURL)
+		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000) even after retry\n", rawURL)
 		return
 	}
 
-	// FIX BUG4: Removed the `if status >= 400 { return }` block entirely
-	// to ensure we check response bodies of 4xx/5xx error pages for reflection.
+	// Note: no `if status >= 400 { return }` gate — response bodies of
+	// 4xx/5xx pages are still checked for reflection, since an error page
+	// can still contain an unsanitized, reflected payload.
 
-	// Check for reflection in the response body.
 	var matched bool
 	if opts.xssMode {
 		matched = xssRe.Match(body)
@@ -198,13 +224,12 @@ func checkURL(rawURL string, opts checkOpts) {
 		result := DomSinkOutput{
 			URL:        rawURL,
 			Sinks:      []string{"body_reflection"},
-			StatusCode: status, // FIX BUG4: Added actual HTTP status code for debugging/visibility
+			StatusCode: status,
 		}
 		opts.outMu.Lock()
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 		opts.outMu.Unlock()
 	} else if status >= 400 {
-		// FIX BUG4: Informational log for high status codes without valid reflection.
 		fmt.Fprintf(os.Stderr, "[INFO] %s: HTTP %d, no reflection found in body (len=%d)\n", rawURL, status, len(body))
 	}
 }

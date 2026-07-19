@@ -26,7 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"sync/atomic" // <-- ADD THIS
+	"syscall"
 	"time"
 
 	"reconpipeline/pkg/ratelimit"
@@ -819,6 +820,8 @@ var (
 	triageEntries []TriageEntry
 )
 
+var aliveProbeTimeout = 12
+
 type TriageEntry struct {
 	TargetURL    string
 	ParamsCount  int
@@ -877,6 +880,19 @@ func isConcreteURL(rawURL string) bool {
 	return true
 }
 
+// isTargetAlive checks whether a target responds at all. It is intentionally
+// lenient:
+//   - Any real HTTP status code — including 4xx and 5xx — counts as "alive",
+//     because an error-page response can still contain a reflected/exploitable
+//     payload in its body (a 500 does not mean the target is unreachable or safe).
+//   - Only a hard connection failure or timeout on every attempt below is
+//     treated as dead. A single slow response must not permanently mark a
+//     live target as dead for the rest of the pipeline.
+//
+// It tries HEAD then GET, each at aliveProbeTimeout and then again at
+// aliveProbeTimeout*2, before giving up. This absorbs one-off slow responses
+// from servers with high baseline latency instead of bailing after a single
+// 5-second attempt.
 func isTargetAlive(targetURL string) bool {
 	ratelimit.Acquire(targetURL)
 
@@ -887,31 +903,34 @@ func isTargetAlive(targetURL string) bool {
 	u.Fragment = ""
 	checkURL := u.String()
 
-	// FIX BUG2: Implemented HEAD and GET logic using curlRequest. Handles status 000 (conn err) vs 4xx.
-	statusCode, _, err := curlRequest(checkURL, "HEAD", nil, "", 5)
-
-	if statusCode == 0 {
-		// Connection failed completely, fallback to GET to be sure
-		statusCode, _, err = curlRequest(checkURL, "GET", nil, "", 5)
-		if statusCode == 0 {
-			return false
-		}
-	} else {
-		// HTTP response received (transport alive)
-		if statusCode < 400 || statusCode == 401 || statusCode == 403 {
-			return true
-		}
-		if statusCode >= 404 && statusCode != 405 {
-			return false
-		}
-		// Fallback to GET for 405 or other ambiguous responses
-		statusCode, _, err = curlRequest(checkURL, "GET", nil, "", 5)
-		if statusCode == 0 {
-			return false
-		}
+	attempts := []struct {
+		method  string
+		timeout int
+	}{
+		{"HEAD", aliveProbeTimeout},
+		{"HEAD", aliveProbeTimeout * 2},
+		{"GET", aliveProbeTimeout},
+		{"GET", aliveProbeTimeout * 2},
 	}
 
-	return statusCode < 500
+	for i, a := range attempts {
+		statusCode, _, _ := curlRequest(checkURL, a.method, nil, "", a.timeout)
+
+		if statusCode == 0 {
+			// Connection failure or timeout on this attempt — try the next
+			// one (longer timeout / different method) before giving up.
+			if i == len(attempts)-1 {
+				return false
+			}
+			continue
+		}
+
+		// Any real HTTP response, including 4xx/5xx, means the target is
+		// alive. Do NOT gate on status code ranges here.
+		return true
+	}
+
+	return false
 }
 
 func checkConnectivity() bool {
@@ -923,15 +942,45 @@ func checkConnectivity() bool {
 	return true
 }
 
+// runCommandTimeout is the hard ceiling for any subprocess launched via
+// runCommand (dom_sink_checker, x9, curl_reflect_checker, nuclei, etc).
+// This exists because subprocess-internal timeouts (e.g. dom_sink_checker's
+// own -timeout flag, or a curl --max-time) do not always fire reliably —
+// e.g. a headless Chrome instance can hang past its own configured timeout
+// due to a stuck render/navigate call. Without this outer guard, a single
+// slow/hung target can block the whole pipeline indefinitely.
+var runCommandTimeout = 5 * time.Minute
+
 func runCommand(name string, args ...string) (string, error) {
 	if name == "nuclei" && !nucleiExists {
 		return "", nil
 	}
-	cmd := exec.Command(name, args...)
+
+	ctx, cancel := context.WithTimeout(context.Background(), runCommandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	// Put the subprocess in its own process group so that if we have to
+	// kill it on timeout, we also kill any children it spawned (e.g.
+	// dom_sink_checker's headless Chrome + the leakless launcher process),
+	// not just the direct child.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+
 	err := cmd.Run()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		// Best-effort: kill the whole process group, not just cmd.Process,
+		// so orphaned Chrome/leakless children don't keep running.
+		if cmd.Process != nil {
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return out.String(), fmt.Errorf("runCommand: %s timed out after %s", name, runCommandTimeout)
+	}
+
 	return out.String(), err
 }
 
@@ -2106,7 +2155,9 @@ func main() {
 	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
 	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")
 	hcTimeoutFlag := flag.Duration("hc-timeout", 5*time.Second, "Proxy health-check timeout")
+	runCmdTimeoutFlag := flag.Duration("cmd-timeout", 5*time.Minute, "Hard timeout for external subprocess calls (dom_sink_checker, x9, curl_reflect_checker)") // <-- ADD THIS
 	flag.Parse()
+	runCommandTimeout = *runCmdTimeoutFlag
 	ratelimit.Init(ratelimit.Config{
 		ReqPerSec:           *rateLimitFlag,
 		HealthCheckInterval: *hcIntervalFlag,
