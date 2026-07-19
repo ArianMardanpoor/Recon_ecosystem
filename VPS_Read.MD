@@ -49,7 +49,7 @@ docker compose run --rm recon-tools bash -c \
 # fresh scan command
 ```
 docker compose run --rm recon-tools bash -c \
-  "/xsscanner/xsscanner -mode fresh"
+  "/xsscanner/xsscanner --fresh"
 ```
 
 # watch cammand 
