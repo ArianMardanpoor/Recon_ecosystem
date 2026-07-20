@@ -792,7 +792,8 @@ var (
 	forceAll             bool
 	concurrency          int
 	workers              int
-	fastWorkers          int // NEW: concurrency for the fast HTTP-reflection pipeline (-fast-workers)
+	domScanEnabled       bool // NEW: Enable DOM/headless sink checks
+	fastWorkers          int  // NEW: concurrency for the fast HTTP-reflection pipeline (-fast-workers)
 	mu                   sync.Mutex
 	tg                   *Telegram
 	allCrawledURLs       []string
@@ -1860,27 +1861,31 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 
 	// Phase 3 DOM: canary probe file (x9 -dom output)
 	domCanaryFile := art.ProbeOutputBase + ".dom.canary"
-	if _, err := os.Stat(domCanaryFile); err == nil {
-		if !hasJS && !forceAll {
-			logLine("SKIP-NOJS", X_cyan, "Skipping DOM checks for %s: no <script> tags detected in page", targetURL)
-			domProbeSkippedAll = true
-		} else if !targetAlive {
-			domProbeSkippedAll = true
-		} else if domSinkCheckerExists {
-			res, err := runCommand("./dom_sink_checker", "-l", domCanaryFile)
-			if err != nil {
-				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, domCanaryFile, err)
-			} else if res == "" {
-				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, domCanaryFile)
-			}
+	if !domScanEnabled {
+		logLine("SKIP-DOM-DISABLED", X_gray, "DOM/headless checks disabled (pass -dom-scan to enable) for %s", targetURL)
+	} else {
+		if _, err := os.Stat(domCanaryFile); err == nil {
+			if !hasJS && !forceAll {
+				logLine("SKIP-NOJS", X_cyan, "Skipping DOM checks for %s: no <script> tags detected in page", targetURL)
+				domProbeSkippedAll = true
+			} else if !targetAlive {
+				domProbeSkippedAll = true
+			} else if domSinkCheckerExists {
+				res, err := runCommand("./dom_sink_checker", "-l", domCanaryFile)
+				if err != nil {
+					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, domCanaryFile, err)
+				} else if res == "" {
+					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, domCanaryFile)
+				}
 
-			if res != "" {
-				lines := strings.Split(strings.TrimSpace(res), "\n")
-				for _, l := range lines {
-					l = strings.TrimSpace(l)
-					var probe DomSinkOutput
-					if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
-						p3Findings["dom"] = append(p3Findings["dom"], l)
+				if res != "" {
+					lines := strings.Split(strings.TrimSpace(res), "\n")
+					for _, l := range lines {
+						l = strings.TrimSpace(l)
+						var probe DomSinkOutput
+						if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
+							p3Findings["dom"] = append(p3Findings["dom"], l)
+						}
 					}
 				}
 			}
@@ -1888,43 +1893,47 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	}
 
 	// Phase 3 DOM: query probe file
-	if _, err := os.Stat(art.DomQueryProbeFile); err == nil {
-		if !hasJS && !forceAll {
-			logLine("SKIP-NOJS", X_cyan, "Skipping DOM query sink checker for %s: no <script> tags detected in page", targetURL)
-			if !targetAlive {
+	if !domScanEnabled {
+		// Silently skip, already logged disabled status above
+	} else {
+		if _, err := os.Stat(art.DomQueryProbeFile); err == nil {
+			if !hasJS && !forceAll {
+				logLine("SKIP-NOJS", X_cyan, "Skipping DOM query sink checker for %s: no <script> tags detected in page", targetURL)
+				if !targetAlive {
+					domProbeSkippedAll = true
+				}
+			} else if !targetAlive {
 				domProbeSkippedAll = true
-			}
-		} else if !targetAlive {
-			domProbeSkippedAll = true
-		} else if domSinkCheckerExists {
-			res, err := runCommand("./dom_sink_checker", "-l", art.DomQueryProbeFile)
-			if err != nil {
-				logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, art.DomQueryProbeFile, err)
-			} else if res == "" {
-				logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, art.DomQueryProbeFile)
-			}
+			} else if domSinkCheckerExists {
+				res, err := runCommand("./dom_sink_checker", "-l", art.DomQueryProbeFile)
+				if err != nil {
+					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, art.DomQueryProbeFile, err)
+				} else if res == "" {
+					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, art.DomQueryProbeFile)
+				}
 
-			if res != "" {
-				lines := strings.Split(strings.TrimSpace(res), "\n")
-				for _, l := range lines {
-					l = strings.TrimSpace(l)
-					var probe DomSinkOutput
-					if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
-						p3Findings["dom"] = append(p3Findings["dom"], l)
+				if res != "" {
+					lines := strings.Split(strings.TrimSpace(res), "\n")
+					for _, l := range lines {
+						l = strings.TrimSpace(l)
+						var probe DomSinkOutput
+						if err := json.Unmarshal([]byte(l), &probe); err == nil && probe.URL != "" {
+							p3Findings["dom"] = append(p3Findings["dom"], l)
+						}
 					}
 				}
 			}
 		}
 	}
 
-	if domProbeSkippedAll && (fileExists(domCanaryFile) || fileExists(art.DomQueryProbeFile)) {
+	if domProbeSkippedAll && domScanEnabled && (fileExists(domCanaryFile) || fileExists(art.DomQueryProbeFile)) {
 		logLine("DEAD", X_yellow, "%s", targetURL)
 	}
 
 	domCount := len(p3Findings["dom"])
 	if domCount > 0 {
 		logLine("HIT-DOM", X_green, "%s → dom: %d", targetURL, domCount)
-	} else {
+	} else if domScanEnabled {
 		logLine("CLEAN-DOM", X_gray, "%s", targetURL)
 	}
 
@@ -1938,90 +1947,97 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	}
 
 	// Phase 4 DOM: fragment URLs
-	var fragmentURLs []string
-	for _, line := range p3Findings["dom"] {
-		var domOut DomSinkOutput
-		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
-			continue
+	if !domScanEnabled {
+		// Skip block
+	} else {
+		var fragmentURLs []string
+		for _, line := range p3Findings["dom"] {
+			var domOut DomSinkOutput
+			if err := json.Unmarshal([]byte(line), &domOut); err != nil {
+				continue
+			}
+			parsed, err := url.Parse(domOut.URL)
+			if err == nil && parsed.Fragment != "" && isInScope(targetURL, domOut.URL) && isConcreteURL(domOut.URL) {
+				fragmentURLs = append(fragmentURLs, domOut.URL)
+			}
 		}
-		parsed, err := url.Parse(domOut.URL)
-		if err == nil && parsed.Fragment != "" && isInScope(targetURL, domOut.URL) && isConcreteURL(domOut.URL) {
-			fragmentURLs = append(fragmentURLs, domOut.URL)
-		}
-	}
-	if len(fragmentURLs) > 0 {
-		if !hasJS && !forceAll {
-			logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM fragment attack for %s: no <script> tags detected in page", targetURL)
-		} else {
-			atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-atk-in.txt")
-			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(fragmentURLs), "\n")), 0644)
-			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom")
-			runCommand("./x9", "-i", atkIn, "-dom", "-o", finalX9Base)
+		if len(fragmentURLs) > 0 {
+			if !hasJS && !forceAll {
+				logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM fragment attack for %s: no <script> tags detected in page", targetURL)
+			} else {
+				atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-atk-in.txt")
+				os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(fragmentURLs), "\n")), 0644)
+				finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom")
+				runCommand("./x9", "-i", atkIn, "-dom", "-o", finalX9Base)
 
-			if domSinkCheckerExists {
-				atkFile := finalX9Base + ".dom.attack"
-				dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
-				if err != nil {
-					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
-				} else if dom == "" {
-					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
-				}
+				if domSinkCheckerExists {
+					atkFile := finalX9Base + ".dom.attack"
+					dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
+					if err != nil {
+						logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
+					} else if dom == "" {
+						logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
+					}
 
-				if dom != "" {
-					report.aggregateFindings(dom, "dom_confirmed")
+					if dom != "" {
+						report.aggregateFindings(dom, "dom_confirmed")
+					}
 				}
 			}
 		}
 	}
 
-	for _, line := range p3Findings["dom"] {
-		var domOut DomSinkOutput
-		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
-			continue
+	if domScanEnabled {
+		for _, line := range p3Findings["dom"] {
+			var domOut DomSinkOutput
+			if err := json.Unmarshal([]byte(line), &domOut); err != nil {
+				continue
+			}
+			report.processDomJson(domOut, "dom")
 		}
-		report.processDomJson(domOut, "dom")
 	}
 
 	// Phase 4c: DOM Query Attack
-	var domQueryURLs []string
-	for _, line := range p3Findings["dom"] {
-		var domOut DomSinkOutput
-		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
-			continue
+	if !domScanEnabled {
+		// Skip block
+	} else {
+		var domQueryURLs []string
+		for _, line := range p3Findings["dom"] {
+			var domOut DomSinkOutput
+			if err := json.Unmarshal([]byte(line), &domOut); err != nil {
+				continue
+			}
+			parsed, err := url.Parse(domOut.URL)
+			if err == nil && parsed.Fragment == "" && isInScope(targetURL, domOut.URL) && isConcreteURL(domOut.URL) {
+				domQueryURLs = append(domQueryURLs, domOut.URL)
+			}
 		}
-		parsed, err := url.Parse(domOut.URL)
-		if err == nil && parsed.Fragment == "" && isInScope(targetURL, domOut.URL) && isConcreteURL(domOut.URL) {
-			domQueryURLs = append(domQueryURLs, domOut.URL)
-		}
-	}
-	if len(domQueryURLs) > 0 {
-		if !hasJS && !forceAll {
-			logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM query attack for %s: no <script> tags detected in page", targetURL)
-		} else {
-			atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-atk-in.txt")
-			os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(domQueryURLs), "\n")), 0644)
-			finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom-query")
-			runCommand("./x9", "-i", atkIn, "-o", finalX9Base)
+		if len(domQueryURLs) > 0 {
+			if !hasJS && !forceAll {
+				logLine("SKIP-NOJS", X_cyan, "Skipping Phase 4 DOM query attack for %s: no <script> tags detected in page", targetURL)
+			} else {
+				atkIn := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-atk-in.txt")
+				os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(domQueryURLs), "\n")), 0644)
+				finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-dom-query")
+				runCommand("./x9", "-i", atkIn, "-o", finalX9Base)
 
-			if domSinkCheckerExists {
-				atkFile := finalX9Base + ".get"
-				dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
-				if err != nil {
-					logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
-				} else if dom == "" {
-					logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
-				}
+				if domSinkCheckerExists {
+					atkFile := finalX9Base + ".get"
+					dom, err := runCommand("./dom_sink_checker", "-xss", "-l", atkFile, "-timeout", "300")
+					if err != nil {
+						logLine("DOMCHECK-ERR", X_red, "%s (%s): dom_sink_checker exited with error: %v", targetURL, atkFile, err)
+					} else if dom == "" {
+						logLine("DOMCHECK-EMPTY", X_yellow, "%s (%s): dom_sink_checker ran but returned no output", targetURL, atkFile)
+					}
 
-				if dom != "" {
-					report.aggregateFindings(dom, "dom_confirmed")
+					if dom != "" {
+						report.aggregateFindings(dom, "dom_confirmed")
+					}
 				}
 			}
 		}
 	}
 
-	// DOM findings are fully determined at this point — report/notify them
-	// as their own follow-up entry for this URL, independent of whatever the
-	// fast pipeline already reported earlier.
 	if report.HasVulns() {
 		tg.notify(report)
 	}
@@ -2090,7 +2106,9 @@ func writeTriageFile(art ProbeArtifacts, p3FindingsDom map[string][]string, domC
 	}
 
 	triageContent.WriteString("[DOM CANARY]\n")
-	if domCount == 0 {
+	if !domScanEnabled {
+		triageContent.WriteString("skipped (DOM scanning disabled, pass -dom-scan to enable)\n\n")
+	} else if domCount == 0 {
 		triageContent.WriteString("none\n\n")
 	} else {
 		for _, line := range p3FindingsDom["dom"] {
@@ -2275,6 +2293,9 @@ func main() {
 	flag.BoolVar(&allowWildcards, "allow-wildcards", false, "Allow wildcard URLs")
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
+	flag.BoolVar(&forceAll, "force-all", false, "Disable tech-aware skipping logic")
+	flag.BoolVar(&domScanEnabled, "dom-scan", false, "Enable DOM/headless sink checks via dom_sink_checker (slow; off by default)")
+	flag.IntVar(&concurrency, "c", 10, "x9 concurrency")
 
 	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
 	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")

@@ -326,7 +326,7 @@ func runIngest(hostname string) {
 
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
-func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int) {
+func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool) {
 	logMsg(fmt.Sprintf("--- Starting: %s ---", target), M_purple+M_bold)
 
 	u, err := url.Parse(target)
@@ -432,6 +432,9 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 		args = append(args, "-skip-spa")
 	}
 	args = append(args, "-phase", fmt.Sprintf("%d", phase))
+	if domScan {
+		args = append(args, "-dom-scan")
+	}
 
 	// اجرای xssniper (فقط یک‌بار)
 	runBinary("./xssniper", args...)
@@ -455,6 +458,7 @@ func main() {
 	skipSPA := flag.Bool("skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	noCrawl := flag.Bool("no-crawl", false, "Skip passive and katana crawling entirely")
 	phase := flag.Int("phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
+	domScan := flag.Bool("dom-scan", false, "Enable DOM/headless sink checks (passed through to xssniper; slow, off by default)")
 	flag.Parse()
 
 	// STEP 1: Capture terminal output to temp file explicitly via logWriter
@@ -526,7 +530,7 @@ func main() {
 
 	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
-		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase)
+		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan)
 	}
 
 	mdPath := "results/TARGET_REPORT.md"
