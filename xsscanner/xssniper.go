@@ -5,6 +5,8 @@
 // - Added helpers: extractReflectedURLsFromCurl, aggregateCurlFindings.
 // - Updated Phase 3 probe loop and Phase 4 heavy-attack loop to use curl_reflect_checker.
 // - FIX BUG2: Migrated http-request-to-target functions from net/http to curl-exec to avoid JA3 blocks.
+// - FIX BUG4: Upgraded Phase 4 GET reflection aggregation in aggregateCurlFindings to confirmed severity.
+// - FIX BUG5: Added retry-on-timeout resilience to curlRequest HTTP helper.
 
 package main
 
@@ -44,10 +46,8 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 
 // ── Curl Request Helper ──────────────────────────────────────────────────────
 
-// FIX BUG2: curlRequest issues a single HTTP request via the curl binary (exec'd) instead
-// of Go's net/http, to avoid JA3/TLS fingerprinting blocks by WAFs.
-// Returns the HTTP status code and the response body.
-func curlRequest(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
+// FIX BUG5: Helper function executing a single curl request attempt.
+func curlRequestAttempt(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
 	args := []string{
 		"-s",
 		"-L",
@@ -105,6 +105,18 @@ func curlRequest(targetURL, method string, headers map[string]string, body strin
 		return 0, respBody, fmt.Errorf("connection failed (status 000)")
 	}
 
+	return statusCode, respBody, nil
+}
+
+// FIX BUG2: curlRequest issues an HTTP request via the curl binary (exec'd) instead
+// of Go's net/http, to avoid JA3/TLS fingerprinting blocks by WAFs.
+// FIX BUG5: Retry-on-timeout resilience — if the initial attempt returns an error or status 0,
+// retry once with double the original timeout before returning failure.
+func curlRequest(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
+	statusCode, respBody, err = curlRequestAttempt(targetURL, method, headers, body, timeout)
+	if err != nil || statusCode == 0 {
+		return curlRequestAttempt(targetURL, method, headers, body, timeout*2)
+	}
 	return statusCode, respBody, nil
 }
 
@@ -1239,7 +1251,8 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 
 		switch phase {
 		case "get":
-			// Add to QueryParameters directly (severity "likely")
+			// FIX BUG4: Phase 4 GET findings from curl_reflect_checker matched raw, unescaped break-char
+			// canary patterns directly, which means they are confirmed reflected XSS candidates.
 			if existing, ok := paramMap[paramName]; ok {
 				// Merge payloads
 				exists := false
@@ -1252,13 +1265,17 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				if !exists {
 					existing.Payloads = append(existing.Payloads, payload)
 				}
-				// Keep severity if it's already higher
+				// Upgrade severity if needed and mark as confirmed
+				if severityWeight("confirmed") > severityWeight(existing.Severity) {
+					existing.Severity = "confirmed"
+				}
+				existing.Confirmed = true
 			} else {
 				paramMap[paramName] = &Vulnerability{
 					Name:      paramName,
-					Severity:  "likely",
+					Severity:  "confirmed",
 					Payloads:  []string{payload},
-					Confirmed: false,
+					Confirmed: true,
 				}
 			}
 		case "json":
@@ -1332,6 +1349,10 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 					// Upgrade severity if needed
 					if severityWeight(vuln.Severity) > severityWeight(existing.Severity) {
 						(*targetSlice)[i].Severity = vuln.Severity
+					}
+					// FIX BUG4: Propagate Confirmed flag when merging into existing report entries
+					if vuln.Confirmed {
+						(*targetSlice)[i].Confirmed = true
 					}
 					found = true
 					break
@@ -1761,7 +1782,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 						reflectedURLs := extractReflectedURLsFromCurl(res)
 						probedCount := countLines(atkFile)
 						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(reflectedURLs))
-						// Aggregate findings into report using our new helper
+						// Aggregate findings into report using our updated helper
 						aggregateCurlFindings(&report, reflectedURLs, ph, targetURL)
 					}
 				} else {
