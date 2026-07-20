@@ -47,7 +47,7 @@ services:
 
 networks:
   watchtower-net:
-    driver: bridge
+    driver: host
 
 volumes:
   recon-results:
