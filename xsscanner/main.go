@@ -262,7 +262,8 @@ func countLinesInDir(dir string) int {
 }
 
 // runIngest runs the python database ingestion script per target
-func runIngest(hostname string) {
+// FIX BUG1: Modified runIngest to return bool to signal success/failure to the caller.
+func runIngest(hostname string) bool {
 	// 1. تنظیم مسیر پایتون با بررسی وجود فایل (os.Stat)
 	pythonPath := os.Getenv("WATCHTOWER_PYTHON")
 	if pythonPath == "" {
@@ -316,11 +317,79 @@ func runIngest(hostname string) {
 
 	if err := cmd.Run(); err != nil {
 		logMsg(fmt.Sprintf("ingest_results.py failed for %s: %v\nStderr: %s", hostname, err, strings.TrimSpace(stderrBuf.String())), M_red)
+		return false
 	} else {
 		outStr := strings.TrimSpace(stdoutBuf.String())
 		if outStr != "" {
 			logMsg(outStr, M_green)
 		}
+		return true
+	}
+}
+
+// FIX BUG2: Added struct and function for JSONL cleanup audit log and output deletion
+type CleanupAuditEntry struct {
+	Timestamp   string   `json:"timestamp"`
+	Target      string   `json:"target"`
+	Directory   string   `json:"directory"`
+	FileCount   int      `json:"file_count"`
+	TotalBytes  int64    `json:"total_bytes"`
+	Removed     bool     `json:"removed"`
+	Error       string   `json:"error,omitempty"`
+	SampleFiles []string `json:"sample_files,omitempty"`
+}
+
+func cleanupTargetOutput(target, dirPath string) {
+	var fileCount int
+	var totalBytes int64
+	var sampleFiles []string
+
+	// 1. Walk directory to collect metrics before deletion
+	_ = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			fileCount++
+			totalBytes += info.Size()
+			if len(sampleFiles) < 10 {
+				sampleFiles = append(sampleFiles, info.Name())
+			}
+		}
+		return nil
+	})
+
+	// 2. Remove directory entirely
+	removeErr := os.RemoveAll(dirPath)
+
+	// 3. Append JSON line to audit log
+	entry := CleanupAuditEntry{
+		Timestamp:   time.Now().Format(time.RFC3339),
+		Target:      target,
+		Directory:   dirPath,
+		FileCount:   fileCount,
+		TotalBytes:  totalBytes,
+		Removed:     removeErr == nil,
+		SampleFiles: sampleFiles,
+	}
+	if removeErr != nil {
+		entry.Error = removeErr.Error()
+	}
+
+	auditFile := filepath.Join(globalOutputDir, "cleanup_audit.jsonl")
+	if f, err := os.OpenFile(auditFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		if b, errMarshal := json.Marshal(entry); errMarshal == nil {
+			f.Write(append(b, '\n'))
+		}
+		f.Close()
+	}
+
+	// 4. Log summary status
+	if removeErr == nil {
+		mb := float64(totalBytes) / (1024 * 1024)
+		logMsg(fmt.Sprintf("Cleanup: removed %d files (%.2f MB) for %s", fileCount, mb, target), M_green)
+	} else {
+		logMsg(fmt.Sprintf("Cleanup FAILED for %s: %v", target, removeErr), M_red)
 	}
 }
 
@@ -344,6 +413,10 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	passiveDir := filepath.Join(globalOutputDir, "passive")
 	katanaDir := filepath.Join(globalOutputDir, "katana")
 	paramsDir := filepath.Join(globalOutputDir, "params")
+
+	// FIX BUG3: Create per-target xssniper isolation directory
+	xssniperOutDir := filepath.Join(globalOutputDir, "xssniper_out", safeURL)
+	os.MkdirAll(xssniperOutDir, 0755)
 
 	os.MkdirAll(passiveDir, 0755)
 	os.MkdirAll(katanaDir, 0755)
@@ -424,7 +497,8 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 		}
 	}
 
-	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3"}
+	// FIX BUG4: Append isolated output directory parameter dynamically
+	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3", "-o", xssniperOutDir}
 	if isSingleTarget {
 		args = append(args, "-u", target)
 	}
@@ -440,7 +514,14 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	runBinary("./xssniper", args...)
 
 	// پایپ‌لاین اینجکشن دیتابیس بلافاصله پس از اتمام کار xssniper
-	runIngest(hostname)
+	// FIX BUG5: Capture status and conditionally clean up the output dir
+	ingestOK := runIngest(hostname)
+
+	if ingestOK {
+		cleanupTargetOutput(target, xssniperOutDir)
+	} else {
+		logMsg(fmt.Sprintf("Cleanup skipped for %s: database ingestion failed", target), M_red)
+	}
 
 	// مارک کردن تارگت به عنوان اسکن شده
 	markAsScanned(target)
