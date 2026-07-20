@@ -1656,28 +1656,35 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	}
 
 	for probePhase, urls := range p3Findings {
-		tempRep := VulnerabilityReport{URL: targetURL}
 		dummy := ""
 		for _, u := range urls {
 			dummy += "[canary] [info] " + u + " [x9canary]\n"
 		}
-		tempRep.aggregateFindings(dummy, probePhase)
+		// Aggregate directly into the function's real report — not a
+		// throwaway local — so confirmed findings actually survive to the
+		// tg.notify(report)/logReportFindings(&report) calls at the end of
+		// this function.
+		report.aggregateFindings(dummy, probePhase)
 
 		var vList *[]Vulnerability
 		switch probePhase {
 		case "get":
-			vList = &tempRep.QueryParameters
+			vList = &report.QueryParameters
 		case "json":
-			vList = &tempRep.JSONBody
+			vList = &report.JSONBody
 		}
 
 		if vList != nil {
-			for _, v := range *vList {
-				if ok, p := confirmParameter(targetURL, probePhase, v.Name); ok {
-					v.Confirmed = true
-					v.Severity = "confirmed"
-					v.Payloads = p
-					confirmedParams[probePhase][v.Name] = true
+			// Iterate by index so mutations (Confirmed/Severity/Payloads)
+			// persist on the actual slice elements, not on a loop-variable
+			// copy that gets discarded.
+			for i := range *vList {
+				name := (*vList)[i].Name
+				if ok, p := confirmParameter(targetURL, probePhase, name); ok {
+					(*vList)[i].Confirmed = true
+					(*vList)[i].Severity = "confirmed"
+					(*vList)[i].Payloads = p
+					confirmedParams[probePhase][name] = true
 				}
 			}
 		}
@@ -2293,9 +2300,7 @@ func main() {
 	flag.BoolVar(&allowWildcards, "allow-wildcards", false, "Allow wildcard URLs")
 	flag.BoolVar(&skipSPA, "skip-spa", true, "Skip SPA detection (if true, do not check for SPA)")
 	flag.IntVar(&phase, "phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
-	flag.BoolVar(&forceAll, "force-all", false, "Disable tech-aware skipping logic")
 	flag.BoolVar(&domScanEnabled, "dom-scan", false, "Enable DOM/headless sink checks via dom_sink_checker (slow; off by default)")
-	flag.IntVar(&concurrency, "c", 10, "x9 concurrency")
 
 	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
 	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")
