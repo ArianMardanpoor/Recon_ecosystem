@@ -92,7 +92,7 @@ WORKDIR /xsscanner
 
 # آپدیت متغیرهای محیطی
 ENV WATCHTOWER_PYTHON=/watchtower/venv/bin/python3
-ENV WATCHTOWER_API_URL=http://watchtower-api:3131/api
+ENV WATCHTOWER_API_URL=http://127.0.0.1:3131/api
 ENV X8_WORDLIST_PATH=/xsscanner/param.txt
 
 CMD ["./xsscanner"]

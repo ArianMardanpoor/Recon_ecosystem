@@ -3,52 +3,33 @@ services:
     build:
       context: ./watchtower
       dockerfile: database/Dockerfile.api
-      network: host 
+      network: host
     container_name: watchtower-api
     command: python3 app.py
-    ports:
-      - "3131:3131"
+    network_mode: host        # <-- روی خود سرویس، runtime
     env_file:
       - .env
     restart: unless-stopped
-    networks:
-      - watchtower-net
-    depends_on:
-      - mongodb
-
-  mongodb:
-    image: mongo:7
-    container_name: watchtower-mongodb
-    restart: unless-stopped
-    volumes:
-      - mongo-data:/data/db
-    networks:
-      - watchtower-net
+    # وقتی network_mode: host هست، دیگه networks: و ports: بی‌معنی/غیرمجازن و باید حذف بشن
 
   recon-tools:
     build:
       context: .
       dockerfile: xsscanner/Dockerfile
-      network: host 
+      network: host
     container_name: recon-tools
+    network_mode: host        # <-- همینجا هم
     env_file:
       - .env
     depends_on:
       - watchtower-api
-    networks:
-      - watchtower-net
     volumes:
       - recon-results:/xsscanner/results
-      - ./.env:/watchtower/.env:ro 
+      - ./.env:/watchtower/.env:ro
       - ./.env:/xsscanner/.env:ro
       - ./.env:/.env:ro
     profiles:
       - manual
 
-networks:
-  watchtower-net:
-    driver: bridge
-
 volumes:
   recon-results:
-  mongo-data:
