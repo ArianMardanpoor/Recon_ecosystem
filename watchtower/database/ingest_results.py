@@ -369,17 +369,16 @@ def ingest_results(hostname: str, workdir: Path, global_mode: bool) -> Tuple[Dic
         )
     
     if all_findings:
-        upsert_scan_findings(hostname, all_findings)
-        
         high_count = sum(1 for f in all_findings if f.get('confidence', '').upper() == 'HIGH')
         if high_count > 0:
             scan_status = 'confirmed_vuln'
-        elif all_findings:
-            scan_status = 'findings'
         else:
-            scan_status = 'clean'
+            scan_status = 'findings'
         
+        upsert_scan_findings(hostname, all_findings, scan_status)
         return stats, scan_status
+
+    return stats, 'clean'
 
 
 # ============================================================================
