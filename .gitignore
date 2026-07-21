@@ -62,7 +62,7 @@ xsscanner/results/
 #programs
 *.json
 !watchtower/programs/Programs/*.json
-
+watchtower-frontend
 
 .env
 .env.*
