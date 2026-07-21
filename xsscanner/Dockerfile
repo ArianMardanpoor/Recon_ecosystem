@@ -25,7 +25,8 @@ RUN go build -o nice_passive nice_passive.go && \
     go build -o x9 x9.go && \
     go build -o xssniper xssniper.go && \
     go build -o xsscanner main.go && \
-    go build -o dom_sink_checker dom_sink_checker.go
+    go build -o dom_sink_checker dom_sink_checker.go && \
+    go build -o curl_reflect_checker curl_reflect_checker.go
 
 # ---------------- Runtime ----------------
 
@@ -74,6 +75,7 @@ COPY --from=builder \
     /build/xssniper \
     /build/xsscanner \
     /build/dom_sink_checker \
+    /build/curl_reflect_checker \
     /xsscanner/
 
 # کپی مستقیم پوشه watchtower به روت
