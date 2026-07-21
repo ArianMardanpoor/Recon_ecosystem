@@ -395,7 +395,7 @@ func cleanupTargetOutput(target, dirPath string) {
 
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
-func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool) {
+func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool) {
 	logMsg(fmt.Sprintf("--- Starting: %s ---", target), M_purple+M_bold)
 
 	u, err := url.Parse(target)
@@ -427,31 +427,35 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 
 	if !noCrawl {
 		// STEP 1: Passive discovery (must finish before anything else starts)
-		logMsg(fmt.Sprintf("[1/3] Running nice_passive for %s", target), M_gray)
+		logMsg(fmt.Sprintf("[1/2] Running nice_passive for %s", target), M_gray)
 		if err := runBinary("./nice_passive", "-o", passiveDir, hostname); err != nil {
 			logMsg(fmt.Sprintf("nice_passive failed for %s: %v", target, err), M_red)
 		}
 
-		// STEP 2: Katana runs ONLY on the unique output of passive phase
-		if countLines(passiveOutFile) > 0 {
-			if spadetect.IsSPA(target) {
-				logMsg(fmt.Sprintf("[SKIP-SPA] %s: SPA detected, skipping katana crawl", target), M_cyan)
-			} else {
-				logMsg(fmt.Sprintf("[2/3] Running nice_katana on passive results for %s", target), M_gray)
-				if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
-					logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+		// STEP 2: Katana is OPT-IN ONLY (-use-katana). Default: skipped entirely.
+		if useKatana {
+			if countLines(passiveOutFile) > 0 {
+				if spadetect.IsSPA(target) {
+					logMsg(fmt.Sprintf("[SKIP-SPA] %s: SPA detected, skipping katana crawl", target), M_cyan)
+				} else {
+					logMsg(fmt.Sprintf("[2/2] Running nice_katana on passive results for %s", target), M_gray)
+					if err := runBinary("./nice_katana", "-o", katanaDir, passiveOutFile); err != nil {
+						logMsg(fmt.Sprintf("nice_katana failed for %s: %v", target, err), M_red)
+					}
 				}
+			} else {
+				logMsg(fmt.Sprintf("No passive URLs found for %s, skipping Katana", target), M_gray)
 			}
 		} else {
-			logMsg(fmt.Sprintf("No passive URLs found for %s, skipping Katana", target), M_gray)
+			logMsg(fmt.Sprintf("Katana disabled (pass -use-katana to enable), skipping crawl for %s", target), M_gray)
 		}
 
-		// STEP 3: Params runs only after Katana is fully done
-		logMsg(fmt.Sprintf("[3/3] Running nice_params for %s", target), M_gray)
+		// STEP 3: Params always runs (independent of katana)
+		logMsg(fmt.Sprintf("Running nice_params for %s", target), M_gray)
 		if err := runBinary("./nice_params", "-u", target, "-d", paramsDir); err != nil {
 			logMsg(fmt.Sprintf("nice_params failed for %s: %v", target, err), M_red)
 		}
-	} // پایان شرط if !noCrawl
+	}
 
 	// Aggregate results and run xssniper
 	logMsg(fmt.Sprintf("Launching XSSniper for %s", target), M_cyan)
@@ -540,6 +544,7 @@ func main() {
 	noCrawl := flag.Bool("no-crawl", false, "Skip passive and katana crawling entirely")
 	phase := flag.Int("phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
 	domScan := flag.Bool("dom-scan", false, "Enable DOM/headless sink checks (passed through to xssniper; slow, off by default)")
+	useKatana := flag.Bool("use-katana", false, "Run nice_katana crawl step (slow; off by default, only passive+params run otherwise)")
 	flag.Parse()
 
 	// STEP 1: Capture terminal output to temp file explicitly via logWriter
@@ -611,7 +616,7 @@ func main() {
 
 	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
-		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan)
+		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana)
 	}
 
 	mdPath := "results/TARGET_REPORT.md"
