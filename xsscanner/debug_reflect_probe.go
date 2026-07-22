@@ -24,8 +24,6 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) " +
 	"Chrome/126.0.0.0 Safari/537.36"
 
-// --- COPIED IDENTICALLY FROM curl_reflect_checker.go ---
-
 func extractMarkerChar(payload string) (byte, bool) {
 	if strings.HasPrefix(payload, "\"") || strings.HasPrefix(payload, "'") {
 		return payload[0], true
@@ -107,8 +105,6 @@ func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err er
 	return statusCode, respBody, nil
 }
 
-// --- DIAGNOSTIC CLI LOGIC ---
-
 func main() {
 	xssMode := flag.Bool("xss", false, "Enable Phase 4 xss/breakout marker verification")
 	flag.Parse()
@@ -134,12 +130,11 @@ func main() {
 	var marker byte
 	var markerOk bool
 	if *xssMode {
-		if !markerOk {
-			// ...
+		marker, markerOk = extractMarkerChar(payload)
+		if markerOk {
+			fmt.Printf("[*] EXTRACTED MARKER: %q (ASCII: %d)\n", marker, marker)
 		} else {
-			bareCanary := reflectctx.ExtractCanary(payload) // <-- NEW
-			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
-			// ...
+			fmt.Println("[*] EXTRACTED MARKER: NOT DETECTED")
 		}
 	}
 
@@ -162,7 +157,6 @@ func main() {
 	fmt.Println("\n--- BODY INSPECTION ---")
 	canaryBytes := []byte(payload)
 
-	// Fast plain-bytes presence check
 	if !bytes.Contains(body, canaryBytes) {
 		fmt.Println("[!] NOT FOUND IN BODY AT ALL")
 	} else {
@@ -203,7 +197,9 @@ func main() {
 			matched := xssRe.Match(body)
 			fmt.Printf("REGEX FALLBACK MATCH: %v\n", matched)
 		} else {
-			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, payload, marker)
+			// ✅ استخراج کانری خام (بدون مارکر)
+			bareCanary := reflectctx.ExtractCanary(payload)
+			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
 			fmt.Printf("VerifyBreakout() -> %v, %s\n", isConfirmed, ctxType)
 			if isConfirmed {
 				fmt.Printf("VERDICT: CONFIRMED (Breakout in %s context)\n", ctxType)

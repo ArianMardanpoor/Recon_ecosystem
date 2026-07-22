@@ -132,7 +132,9 @@ func ClassifyContext(body []byte, canaryOffset int) ReflectionContext {
 						safe = false
 						break
 					}
-					if mc == c {
+					// The character immediately before the canary is the injected
+					// leading‑marker quote – it must not be treated as a closing quote.
+					if mc == c && m != canaryOffset-1 {
 						if m == 0 || body[m-1] != '\\' {
 							safe = false
 							break
@@ -251,6 +253,7 @@ func VerifyBreakout(body []byte, canary string, markerChar byte) (bool, ContextT
 
 	return false, ContextUnknown
 }
+
 func ExtractCanary(full string) string {
 	// bareCanaryRe matches either "x9" + 3 letters or "x9canary" + 3 letters
 	bareCanaryRe := regexp.MustCompile(`x9(?:canary)?[a-z]{3}`)

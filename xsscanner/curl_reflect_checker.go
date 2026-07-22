@@ -226,22 +226,12 @@ func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err er
 }
 
 func checkURL(rawURL string, opts checkOpts) {
-	// Extract the DECODED payload substring from the URL so we get literal
-	// markers (like '"', '<b9') instead of their %-encoded equivalents.
 	payload := getDecodedPayload(rawURL)
 	if payload == "" {
 		return
 	}
 
-	// First attempt at the configured timeout.
 	status, body, err := curlAttempt(rawURL, opts.timeout)
-
-	// PATCH: if the first attempt hard-failed (curl error / timeout /
-	// status 0), retry once with a doubled timeout instead of giving up
-	// immediately. This is what silently swallowed real reflections against
-	// a slow-but-live target: the server can take ~7-8s to respond, which
-	// sits right at the edge of what a tight --max-time can absorb once
-	// concurrent workers add queueing delay.
 	if err != nil || status == 0 {
 		retryTimeout := opts.timeout * 2
 		status, body, err = curlAttempt(rawURL, retryTimeout)
@@ -251,15 +241,10 @@ func checkURL(rawURL string, opts checkOpts) {
 			return
 		}
 	}
-
 	if status == 0 {
 		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000) even after retry\n", rawURL)
 		return
 	}
-
-	// Note: no `if status >= 400 { return }` gate — response bodies of
-	// 4xx/5xx pages are still checked for reflection, since an error page
-	// can still contain an unsanitized, reflected payload.
 
 	var matched bool
 	var sinkStr = "body_reflection"
@@ -270,7 +255,9 @@ func checkURL(rawURL string, opts checkOpts) {
 			fmt.Fprintf(os.Stderr, "[WARN] Could not determine marker char for payload %q in %s, falling back to regex\n", payload, rawURL)
 			matched = xssRe.Match(body)
 		} else {
-			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, payload, marker)
+			// ✅ استخراج کانری خام (بدون مارکر)
+			bareCanary := reflectctx.ExtractCanary(payload)
+			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
 			matched = isConfirmed
 			if matched && ctxType != reflectctx.ContextUnknown {
 				sinkStr = "body_reflection:" + string(ctxType)
@@ -279,18 +266,7 @@ func checkURL(rawURL string, opts checkOpts) {
 	} else {
 		matched = canaryRe.Match(body) && bytes.Contains(body, []byte(payload))
 	}
-	if opts.xssMode {
-		marker, ok := extractMarkerChar(payload)
-		if !ok {
-			// fallback to regex if marker cannot be determined
-			matched = xssRe.Match(body)
-		} else {
-			bareCanary := reflectctx.ExtractCanary(payload) // <-- NEW
-			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
-			matched = isConfirmed
-			// ...
-		}
-	}
+
 	if matched {
 		result := DomSinkOutput{
 			URL:        rawURL,
