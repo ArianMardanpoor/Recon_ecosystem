@@ -1,8 +1,0 @@
-{
-  "program_name": "informatica",
-  "scopes": [
-    "*.informatica.com",
-    "*.informaticacloud.com"
-  ],
-  "outofscope": []
-}

@@ -1,0 +1,13 @@
+{
+  "program_name": "luminor",
+  "scopes": [
+    "*.luminor.lt",
+    "*.luminor.lv",
+    "*.luminor.ee",
+    "*.luminorgroup.com"
+  ],
+  "outofscope": [
+    "luminor.nyc3.digitaloceanspaces.com",
+    "*.ondato.net"
+  ]
+}

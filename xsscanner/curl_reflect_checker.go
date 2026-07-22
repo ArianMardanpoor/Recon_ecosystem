@@ -12,6 +12,7 @@
 // or status 000 used to be silently logged and treated as "no reflection",
 // causing false negatives on real, confirmed vulnerabilities. checkURL now
 // retries once with a doubled timeout before giving up on a URL.
+
 package main
 
 import (
@@ -28,11 +29,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"reconpipeline/pkg/reflectctx"
 )
 
-// reX9 extracts the canary / break-char payload embedded in the URL.
-// Mirrors xssniper.go's reX9:  x9(?:canary)?[a-z]*
-var reX9 = regexp.MustCompile(`x9(?:canary)?[a-z]*`)
+var reX9 = regexp.MustCompile(`(?:<b9|['"])?x9(?:canary)?[a-z]*(?:['"\;<{]|\{\{)?`)
 
 // canaryRe — canary_matcher.yaml regex, byte-for-byte identical:
 //
@@ -60,6 +61,26 @@ type checkOpts struct {
 	xssMode bool
 	timeout int
 	outMu   *sync.Mutex
+}
+
+// extractMarkerChar determines the intended breakout character from the x9 payload.
+func extractMarkerChar(payload string) (byte, bool) {
+	if strings.HasPrefix(payload, "\"") || strings.HasPrefix(payload, "'") {
+		return payload[0], true
+	}
+	if strings.HasPrefix(payload, "<b9") {
+		return '<', true
+	}
+	if len(payload) > 0 {
+		last := payload[len(payload)-1]
+		if last == '\'' || last == '"' || last == '`' || last == '<' || last == ';' {
+			return last, true
+		}
+		if strings.HasSuffix(payload, "{{") {
+			return '{', true
+		}
+	}
+	return 0, false
 }
 
 func main() {
@@ -214,8 +235,20 @@ func checkURL(rawURL string, opts checkOpts) {
 	// can still contain an unsanitized, reflected payload.
 
 	var matched bool
+	var sinkStr = "body_reflection"
+
 	if opts.xssMode {
-		matched = xssRe.Match(body)
+		marker, ok := extractMarkerChar(payload)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[WARN] Could not determine marker char for payload %q in %s, falling back to regex\n", payload, rawURL)
+			matched = xssRe.Match(body)
+		} else {
+			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, payload, marker)
+			matched = isConfirmed
+			if matched && ctxType != reflectctx.ContextUnknown {
+				sinkStr = "body_reflection:" + string(ctxType)
+			}
+		}
 	} else {
 		matched = canaryRe.Match(body) && bytes.Contains(body, []byte(payload))
 	}
@@ -223,7 +256,7 @@ func checkURL(rawURL string, opts checkOpts) {
 	if matched {
 		result := DomSinkOutput{
 			URL:        rawURL,
-			Sinks:      []string{"body_reflection"},
+			Sinks:      []string{sinkStr},
 			StatusCode: status,
 		}
 		opts.outMu.Lock()

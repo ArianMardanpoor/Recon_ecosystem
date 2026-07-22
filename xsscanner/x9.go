@@ -68,6 +68,13 @@ func randomString(n int) string {
 	return string(s)
 }
 
+// Leading markers let the verifier look for the exact two-character sequence
+// (quoteChar + quoteChar, since buildURLSafe's own URL-encoding of the
+// value means the original context quote plus our injected quote appear
+// back to back) immediately before the canary, which is robust
+// regardless of what appears after the injection point in the response
+// (truncation, filtering, etc. downstream of the injection point no
+// longer matters).
 func getBreakPayloads() []string {
 	prefix := "x9" + randomString(3)
 	return []string{
@@ -77,6 +84,9 @@ func getBreakPayloads() []string {
 		prefix + "<",
 		prefix + ";",
 		prefix + "{{",
+		"\"" + prefix,  // NEW: leading double-quote marker
+		"'" + prefix,   // NEW: leading single-quote marker
+		"<b9" + prefix, // NEW: leading tag-open marker
 	}
 }
 

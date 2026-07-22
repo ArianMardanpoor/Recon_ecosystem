@@ -1,0 +1,8 @@
+{
+  "program_name": "discover-vdp",
+  "scopes": [
+    "*.discover.com",
+    "*.discoverfinancial.com"
+  ],
+  "outofscope": []
+}

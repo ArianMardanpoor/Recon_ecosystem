@@ -23,6 +23,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reconpipeline/pkg/ratelimit"
+	"reconpipeline/pkg/reflectctx"
+	"reconpipeline/pkg/reporter"
+	"reconpipeline/pkg/spadetect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -31,10 +35,6 @@ import (
 	"sync/atomic" // <-- ADD THIS
 	"syscall"
 	"time"
-
-	"reconpipeline/pkg/ratelimit"
-	"reconpipeline/pkg/reporter"
-	"reconpipeline/pkg/spadetect"
 )
 
 var repLogger *reporter.Logger
@@ -825,7 +825,8 @@ var (
 
 	phase int
 
-	reX9       = regexp.MustCompile(`x9(?:canary)?[a-z]*`)
+	// Replace the old reX9 definition with this:
+	reX9       = regexp.MustCompile(`(?:<b9|['"])?x9(?:canary)?[a-z]*(?:['"\;<{]|\{\{)?`)
 	rePayload  = regexp.MustCompile(`\[(?:"([^"]+)"|([^"\]]+))\]$`)
 	reANSI     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	reCleaning = regexp.MustCompile(`\s*\["0m"\]\s*`)
@@ -1072,16 +1073,64 @@ func randomString(n int) string {
 	return string(s)
 }
 
+// Add to imports: "reconpipeline/pkg/reflectctx"
+
+// reflectionExistsVerified executes the HTTP request and runs the context-aware breakout verification.
+func reflectionExistsVerified(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte) bool {
+	ratelimit.Acquire(targetURL)
+
+	finalURL := targetURL
+	if method == "GET" {
+		if u, err := url.Parse(targetURL); err == nil {
+			q := u.Query()
+			cbName := "_cb"
+			_, exists := q[cbName]
+			for exists {
+				cbName = "_cb" + randomString(3)
+				_, exists = q[cbName]
+			}
+			q.Set(cbName, fmt.Sprintf("%d_%s", time.Now().UnixNano(), randomString(4)))
+			u.RawQuery = q.Encode()
+			finalURL = u.String()
+		}
+	}
+
+	statusCode, respBody, err := curlRequest(finalURL, method, headers, reqBody, 15)
+	if err != nil || statusCode == 0 {
+		return false
+	}
+
+	isConfirmed, _ := reflectctx.VerifyBreakout(respBody, payload, markerChar)
+	return isConfirmed
+}
+
 func confirmParameter(targetURL, phase, name string) (bool, []string) {
 	prefix := "x9" + randomString(3)
-	breakChars := []string{"'", "\"", "`", "<", ";", "{{"}
+
+	type pSpec struct {
+		payload string
+		marker  byte
+	}
+
+	// Matches x9.go's generated payload suite, including leading variants
+	specs := []pSpec{
+		{prefix + "'", '\''},
+		{prefix + "\"", '"'},
+		{prefix + "`", '`'},
+		{prefix + "<", '<'},
+		{prefix + ";", ';'},
+		{prefix + "{{", '{'},
+		{"\"" + prefix, '"'},
+		{"'" + prefix, '\''},
+		{"<b9" + prefix, '<'},
+	}
+
 	var confirmed []string
 
-	for _, bc := range breakChars {
-		p := prefix + bc
+	for _, spec := range specs {
 		method := "GET"
 		headers := make(map[string]string)
-		body := ""
+		reqBody := ""
 		finalURL := targetURL
 
 		u, err := url.Parse(targetURL)
@@ -1092,21 +1141,21 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 		switch phase {
 		case "get":
 			q := u.Query()
-			q.Set(name, p)
+			q.Set(name, spec.payload)
 			u.RawQuery = q.Encode()
 			finalURL = u.String()
 		case "header":
-			headers[name] = p
+			headers[name] = spec.payload
 		case "json":
 			method = "POST"
 			data := make(map[string]interface{})
-			data[name] = p
+			data[name] = spec.payload
 			b, _ := json.Marshal(data)
-			body = string(b)
+			reqBody = string(b)
 		}
 
-		if reflectionExists(finalURL, method, headers, body, p) {
-			confirmed = append(confirmed, p)
+		if reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker) {
+			confirmed = append(confirmed, spec.payload)
 		}
 	}
 	return len(confirmed) > 0, confirmed
