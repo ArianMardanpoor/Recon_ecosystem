@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -81,6 +82,32 @@ func extractMarkerChar(payload string) (byte, bool) {
 		}
 	}
 	return 0, false
+}
+
+// getDecodedPayload correctly parses the URL and unescapes the parameter values
+// before searching for the x9 canary and its breakout markers.
+func getDecodedPayload(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err == nil {
+		for _, vals := range parsed.Query() {
+			for _, v := range vals {
+				if match := reX9.FindString(v); match != "" {
+					return match
+				}
+			}
+		}
+	}
+
+	// Fallback: If not found in query params (e.g., it's in the path or fragment),
+	// match against the raw URL and unescape the result.
+	rawMatch := reX9.FindString(rawURL)
+	if rawMatch != "" {
+		if unescaped, err := url.QueryUnescape(rawMatch); err == nil {
+			return unescaped
+		}
+		return rawMatch
+	}
+	return ""
 }
 
 func main() {
@@ -199,9 +226,9 @@ func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err er
 }
 
 func checkURL(rawURL string, opts checkOpts) {
-	// Extract the payload substring from the URL so we know what to
-	// search for in the response body (same approach as xssniper.go).
-	payload := reX9.FindString(rawURL)
+	// Extract the DECODED payload substring from the URL so we get literal
+	// markers (like '"', '<b9') instead of their %-encoded equivalents.
+	payload := getDecodedPayload(rawURL)
 	if payload == "" {
 		return
 	}
