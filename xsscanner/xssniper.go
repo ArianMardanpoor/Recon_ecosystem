@@ -1100,7 +1100,9 @@ func reflectionExistsVerified(targetURL, method string, headers map[string]strin
 		return false
 	}
 
-	isConfirmed, _ := reflectctx.VerifyBreakout(respBody, payload, markerChar)
+	// ✅ استخراج کانری خام (بدون مارکر) قبل از ارسال به VerifyBreakout
+	bareCanary := reflectctx.ExtractCanary(payload)
+	isConfirmed, _ := reflectctx.VerifyBreakout(respBody, bareCanary, markerChar)
 	return isConfirmed
 }
 

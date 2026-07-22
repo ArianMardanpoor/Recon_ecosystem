@@ -2,6 +2,7 @@ package reflectctx
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 )
 
@@ -249,4 +250,15 @@ func VerifyBreakout(body []byte, canary string, markerChar byte) (bool, ContextT
 	}
 
 	return false, ContextUnknown
+}
+func ExtractCanary(full string) string {
+	// bareCanaryRe matches either "x9" + 3 letters or "x9canary" + 3 letters
+	bareCanaryRe := regexp.MustCompile(`x9(?:canary)?[a-z]{3}`)
+	match := bareCanaryRe.FindString(full)
+	if match != "" {
+		return match
+	}
+	// fallback: return the full string; this preserves existing behaviour
+	// for probe mode or unexpected cases.
+	return full
 }

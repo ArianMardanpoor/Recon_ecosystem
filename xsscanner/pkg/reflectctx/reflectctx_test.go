@@ -7,6 +7,25 @@ import (
 	"testing"
 )
 
+func TestVerifyBreakout_DoubledQuoteRegression(t *testing.T) {
+	// Real body snippet from a live vulnerable target.
+	body := []byte(`... value=""x9dbgabc" ...`) // exact pattern with doubled quote before canary
+
+	// Case 1: BARE canary (correct) -> should confirm breakout.
+	confirmed, ctxType := VerifyBreakout(body, "x9dbgabc", '"')
+	if !confirmed {
+		t.Errorf("Expected confirmed true, got false")
+	}
+	if ctxType != ContextHTMLAttrQuoted {
+		t.Errorf("Expected ContextHTMLAttrQuoted, got %v", ctxType)
+	}
+
+	// Case 2: FULL payload including marker (buggy) -> should NOT confirm.
+	confirmed2, _ := VerifyBreakout(body, "\"x9dbgabc", '"')
+	if confirmed2 {
+		t.Errorf("Expected confirmed false for full payload, got true")
+	}
+}
 func TestClassifyContext(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -279,7 +279,18 @@ func checkURL(rawURL string, opts checkOpts) {
 	} else {
 		matched = canaryRe.Match(body) && bytes.Contains(body, []byte(payload))
 	}
-
+	if opts.xssMode {
+		marker, ok := extractMarkerChar(payload)
+		if !ok {
+			// fallback to regex if marker cannot be determined
+			matched = xssRe.Match(body)
+		} else {
+			bareCanary := reflectctx.ExtractCanary(payload) // <-- NEW
+			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
+			matched = isConfirmed
+			// ...
+		}
+	}
 	if matched {
 		result := DomSinkOutput{
 			URL:        rawURL,
