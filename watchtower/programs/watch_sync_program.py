@@ -120,8 +120,8 @@ def remove_stale_programs(active_programs):
             # استفاده از تابع موجود برای حذف آبشاری از تمام کالکشن‌ها
             delete_program(prog)
             
-        except Exception as e:
-            logger.exception(f"Unexpected error while removing stale programs: {e}")
+    except Exception as e:
+        logger.exception(f"Unexpected error while removing stale programs: {e}")
 
 
 if __name__ == "__main__":
