@@ -297,7 +297,7 @@ def upsert_program(program_name, scopes, outofscopes, config=None):
 
 @retry_on_autoreconnect(max_retries=3)
 def upsert_subdomain(program_name, subdomain_name, provider):
-    """درج یا بروزرسانی یک ساب‌دامین تکی با بررسی scope"""
+    """درج یا بروزرسانی یک ساب‌دامین تکی با استفاده از عملیات اتمیک برای جلوگیری از Race Condition"""
     program = Programs.objects(program_name=program_name).first()
 
     if not program:
@@ -311,28 +311,26 @@ def upsert_subdomain(program_name, subdomain_name, provider):
         return False
 
     scope_domain = get_domain_name(subdomain_name)
-    existing = Subdomains.objects(program_name=program_name, subdomain=subdomain_name).first()
 
-    if existing:
-        if provider not in existing.providers:
-            existing.providers.append(provider)
-            print(f"[{current_time()}] Added provider to subdomain: {subdomain_name}")
-        existing.last_update = datetime.now()
-        existing.save()
-    else:
-        new_subdomain = Subdomains(
-            program_name=program_name,
-            subdomain=subdomain_name,
-            scope=scope_domain,
-            providers=[provider],
-            created_date=datetime.now(),
-            last_update=datetime.now()
+    try:
+        # استفاده از update_one با قابلیت upsert برای جلوگیری از NotUniqueError
+        Subdomains.objects(
+            program_name=program_name, 
+            subdomain=subdomain_name
+        ).update_one(
+            set_on_insert__scope=scope_domain,
+            set_on_insert__created_date=datetime.now(),
+            set_on_insert__tested=False,
+            set__last_update=datetime.now(),
+            add_to_set__providers=provider, # add_to_set خودش چک میکنه تکراری نباشه
+            upsert=True
         )
-        new_subdomain.save()
-        print(f"[{current_time()}] Inserted new subdomain: {subdomain_name}")
-
-    return True
-
+        print(f"[{current_time()}] Safely upserted subdomain: {subdomain_name}")
+        return True
+        
+    except Exception as e:
+        print(f"[{current_time()}] Error during atomic upsert for {subdomain_name}: {e}")
+        return False
 
 @retry_on_autoreconnect(max_retries=3)
 def bulk_upsert_subdomains(program_name, subdomains_list, provider):
