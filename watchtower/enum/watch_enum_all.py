@@ -2,10 +2,11 @@
 import sys, os, subprocess
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from utils.cli_helpers import parse_program_filter
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, current_time
 from utils.scope_classifier import is_enumerable_domain
+from utils.cli_helpers import parse_program_filter
 
 ENUM_DIR = os.path.dirname(os.path.abspath(__file__))
 

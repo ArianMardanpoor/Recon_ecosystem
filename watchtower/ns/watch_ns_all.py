@@ -4,11 +4,12 @@ import os
 import json
 import tempfile
 import argparse
-from utils.cli_helpers import parse_program_filter
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, Subdomains, upsert_live, current_time
 from utils.safe_subprocess import run_command_safe
 from utils.wildcard_filter import filter_wildcards
+from utils.cli_helpers import parse_program_filter
 
 DNSX_BASE_FLAGS = ["-silent", "-resp", "-json", "-r", "8.8.8.8,1.1.1.1", "-t", "50", "-rl", "100"]
 
