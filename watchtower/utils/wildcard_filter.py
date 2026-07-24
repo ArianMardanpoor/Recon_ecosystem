@@ -12,6 +12,19 @@ Flow:
 4. Any parent whose fake sibling resolved = wildcard zone -> every real
    subdomain under it gets discarded.
 5. Whatever survives is genuine and safe to upsert_live.
+
+FIX (2026-07-24): At high fake-probe volumes against public resolvers
+(8.8.8.8 / 1.1.1.1), dnsx can occasionally emit a JSON line for a host that
+failed to resolve (SERVFAIL / rate-limited / transient resolver hiccup)
+with an empty "a": [] IP list, instead of omitting the line entirely or
+returning a clean NXDOMAIN. The previous version of this filter only
+checked `if host:` when deciding whether a fake probe "resolved", so any
+such empty-IP line was wrongly counted as a wildcard hit. Against a domain
+with hundreds of unique parent zones, this could cascade into flagging the
+apex domain itself as a wildcard parent, discarding the ENTIRE batch of
+otherwise-genuine subdomains (see debug_wildcard.py trace: fake probe
+resolved -> [] for dozens of parents). Fixed by only treating a fake probe
+as a wildcard signal when it actually returned at least one non-empty IP.
 """
 
 import random
@@ -96,7 +109,14 @@ def filter_wildcards(live_map):
     fake_resolved = _run_dnsx(fake_list)  # only resolves if THAT zone is wildcard
 
     wildcard_parents = set()
-    for fake_host in fake_resolved.keys():
+    for fake_host, ips in fake_resolved.items():
+        # FIX: dnsx can emit a JSON line for a host with an empty "a": []
+        # list when the query hit a resolver hiccup / rate limit / SERVFAIL
+        # instead of a clean NXDOMAIN. That is NOT evidence of a wildcard —
+        # only a non-empty IP list means the fake random subdomain actually
+        # resolved to something, which is the real wildcard signal.
+        if not ips:
+            continue
         parent = fake_to_parent.get(fake_host)
         if parent:
             wildcard_parents.add(parent)
