@@ -3,14 +3,37 @@ import sys
 import os
 import json
 import tempfile
-
+import argparse
+from utils.cli_helpers import parse_program_filter
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, LiveSubdomains, upsert_http, current_time
 from utils.safe_subprocess import run_command_safe
 from utils.notify import flush_all
 
 if __name__ == "__main__":
-    programs = Programs.objects.all()
+    parser = argparse.ArgumentParser(description="Run Httpx All for all (or one/multiple) program(s).")
+    parser.add_argument('--program', type=str, default=None,
+                        help="Run only for the specified program name(s), comma-separated.")
+    args = parser.parse_args()
+
+    program_filter = parse_program_filter(args.program)
+
+    # ۱. واکشی اطلاعات از دیتابیس[cite: 5]
+    if program_filter:
+        print(f"[{current_time()}] Running in filtered mode for programs: {', '.join(program_filter)}")
+        programs = Programs.objects(program_name__in=program_filter)
+        
+        found_programs = [p.program_name for p in programs]
+        for p in program_filter:
+            if p not in found_programs:
+                print(f"[{current_time()}] [!] Warning: program '{p}' not found in database, skipping")
+                
+        if not programs:
+            print(f"[{current_time()}] [!] Error: None of the specified programs were found in database.")
+            sys.exit(1)
+    else:
+        print(f"[{current_time()}] Running in full mode (all programs)")
+        programs = Programs.objects.all()
     
     for program in programs:
         for scope in program.scopes:
@@ -66,5 +89,5 @@ if __name__ == "__main__":
             else:
                 print(f"[{current_time()}] No live subdomains for scope: {scope}")
 
-    # ارسال تمام نوتیف‌های بافرشده در پایان اسکن
+    # ارسال تمام نوتیف‌های بافرشده در پایان اسکن[cite: 5]
     flush_all()

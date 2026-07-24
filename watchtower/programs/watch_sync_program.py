@@ -3,15 +3,15 @@ import os
 import sys
 import json
 import logging
+import argparse
 from pathlib import Path
 import tldextract
 
-# اضافه کردن مسیر روت پروژه به sys.path برای ایمپورت‌های تمیزتر
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# ایمپورت توابع دیتابیس از جمله bulk_upsert_subdomains برای درج مستقیم
 from database.db import upsert_program, delete_program, Programs, bulk_upsert_subdomains
 from utils.scope_classifier import classify_scope
+from utils.cli_helpers import parse_program_filter
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SyncProgram")
@@ -20,14 +20,6 @@ BASE_DIR = Path(__file__).parent
 PROGRAMS_DIR = BASE_DIR / "Programs"
 
 def parse_scopes(scopes):
-    """
-    اسکوپ‌ها را بررسی کرده و پنج خروجی می‌دهد:
-    1. recon_domains: دامین‌های پایه برای اسکن
-    2. regex_patterns: پترن‌های رجکس برای فیلتر نتایج نهایی
-    3. pre_resolved_urls: آدرس‌های URL کامل
-    4. ip_ranges: آدرس‌های IP و رنج‌های CIDR
-    5. known_subdomains: ساب‌دامین‌های لیترال که باید مستقیم در دیتابیس درج شوند
-    """
     recon_domains = set()
     regex_patterns = []
     pre_resolved_urls = set()
@@ -35,7 +27,6 @@ def parse_scopes(scopes):
     known_subdomains = set()
 
     for scope in scopes:
-        # تبدیل وایلدکارد به رجکس
         regex_str = scope.replace('.', r'\.').replace('*', '.*')
         regex_patterns.append(f"^{regex_str}$")
 
@@ -52,7 +43,6 @@ def parse_scopes(scopes):
         elif scope_type == "literal_subdomain":
             known_subdomains.add(scope)
             
-            # استخراج دامنه‌ی ریشه برای اطمینان از اینکه اگر خودش دامنه ریشه است (مثلاً cbre.com) همچنان enum شود
             ext = tldextract.extract(scope)
             root_domain = f"{ext.domain}.{ext.suffix}"
             if scope == root_domain:
@@ -62,20 +52,33 @@ def parse_scopes(scopes):
 
     return list(recon_domains), regex_patterns, list(pre_resolved_urls), list(ip_ranges), list(known_subdomains)
 
-def scan_json(directory: Path):
-    """اسکن دایرکتوری برای فایل‌های JSON برنامه‌ها (افزودن/آپدیت) و برگرداندن لیست برنامه‌های فعال"""
+def scan_json(directory: Path, program_filter: list = None):
     active_programs = set()
 
     if not directory.exists() or not directory.is_dir():
         logger.error(f"Directory not found or invalid: {directory.resolve()}")
+        if program_filter:
+            sys.exit(1)
         return active_programs
 
-    json_files = list(directory.glob('*.json'))
-    if not json_files:
-        logger.warning(f"No JSON files found in: {directory.resolve()}")
-        return active_programs
-
-    logger.info(f"Found {len(json_files)} program file(s) in: {directory.resolve()}")
+    json_files = []
+    if program_filter:
+        for p in program_filter:
+            target_file = directory / f"{p}.json"
+            if target_file.exists():
+                json_files.append(target_file)
+            else:
+                logger.warning(f"[!] Warning: program '{p}' not found in directory, skipping")
+        
+        if not json_files:
+            logger.error("None of the specified programs were found in directory.")
+            sys.exit(1)
+    else:
+        json_files = list(directory.glob('*.json'))
+        if not json_files:
+            logger.warning(f"No JSON files found in: {directory.resolve()}")
+            return active_programs
+        logger.info(f"Found {len(json_files)} program file(s) in: {directory.resolve()}")
 
     for file_path in json_files:
         try:
@@ -85,7 +88,6 @@ def scan_json(directory: Path):
                 program_name = data.get("program_name")
                 scopes = data.get("scopes", [])
 
-                # پشتیبانی از هر دو فرمت outofscope و outofscopes
                 outofscopes = data.get("outofscope", data.get("outofscopes", []))
                 config_data = data.get("config", {})
 
@@ -116,9 +118,7 @@ def scan_json(directory: Path):
     return active_programs
 
 def remove_stale_programs(active_programs):
-    """برنامه‌هایی که در دیتابیس هستند اما فایل JSON آن‌ها در دایرکتوری نیست را حذف می‌کند."""
     logger.info("Checking database for stale programs to delete...")
-    
     try:
         db_programs = set(Programs.objects().distinct('program_name'))
         programs_to_delete = db_programs - active_programs
@@ -135,13 +135,24 @@ def remove_stale_programs(active_programs):
         logger.exception(f"Unexpected error while removing stale programs: {e}")
 
 if __name__ == "__main__":
-    logger.info(f"Starting sync from directory: {PROGRAMS_DIR.resolve()}")
-    
-    active_programs_in_dir = scan_json(PROGRAMS_DIR)
-    
-    if active_programs_in_dir:
-        remove_stale_programs(active_programs_in_dir)
-    else:
-        logger.warning("No active programs found in directory. Skipping deletion to prevent accidental wipe.")
+    parser = argparse.ArgumentParser(description="Sync Watchtower programs from JSON files.")
+    parser.add_argument('--program', type=str, default=None,
+                        help="Sync only the specified program name(s), comma-separated (skips stale-program deletion entirely).")
+    args = parser.parse_args()
 
-    logger.info("Sync finished.")
+    program_filter = parse_program_filter(args.program)
+
+    if program_filter:
+        logger.info(f"Running in filtered mode for programs: {', '.join(program_filter)} — stale program cleanup is DISABLED in this mode.")
+        scan_json(PROGRAMS_DIR, program_filter=program_filter)
+        logger.info("Filtered-programs sync finished.")
+    else:
+        logger.info(f"Running in full mode (all programs). Starting sync from directory: {PROGRAMS_DIR.resolve()}")
+        active_programs_in_dir = scan_json(PROGRAMS_DIR)
+        
+        if active_programs_in_dir:
+            remove_stale_programs(active_programs_in_dir)
+        else:
+            logger.warning("No active programs found in directory. Skipping deletion to prevent accidental wipe.")
+
+        logger.info("Full sync finished.")

@@ -1,8 +1,8 @@
-# مسیر فایل: watchtower/enum/watch_enum_all.py
 #!/usr/bin/env python3
 import sys, os, subprocess
+import argparse
 from concurrent.futures import ThreadPoolExecutor
-
+from utils.cli_helpers import parse_program_filter
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, current_time
 from utils.scope_classifier import is_enumerable_domain
@@ -12,7 +12,6 @@ ENUM_DIR = os.path.dirname(os.path.abspath(__file__))
 def run_module(command):
     try:
         print(f"[{current_time()}] Starting: {' '.join(command)}")
-        # تایم‌اوت ۱۰ دقیقه‌ای برای ماژول‌های سنگین‌تر مثل GitHub یا Wayback
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
         if result.returncode != 0:
             print(f"[{current_time()}] Error in {' '.join(command)}:\n{result.stderr}")
@@ -22,8 +21,30 @@ def run_module(command):
         print(f"[{current_time()}] Exception: {e}")
 
 if __name__ == "__main__":
-    # ۱. واکشی اطلاعات از دیتابیس
-    programs = Programs.objects.all()
+    parser = argparse.ArgumentParser(description="Run enum modules for all (or one/multiple) program(s).")
+    parser.add_argument('--program', type=str, default=None,
+                        help="Run enum only for the specified program name(s), comma-separated.")
+    args = parser.parse_args()
+
+    program_filter = parse_program_filter(args.program)
+
+    # ۱. واکشی اطلاعات از دیتابیس[cite: 6]
+    if program_filter:
+        print(f"[{current_time()}] Running in filtered mode for programs: {', '.join(program_filter)}")
+        programs = Programs.objects(program_name__in=program_filter)
+        
+        found_programs = [p.program_name for p in programs]
+        for p in program_filter:
+            if p not in found_programs:
+                print(f"[{current_time()}] [!] Warning: program '{p}' not found in database, skipping")
+                
+        if not programs:
+            print(f"[{current_time()}] [!] Error: None of the specified programs were found in database.")
+            sys.exit(1)
+    else:
+        print(f"[{current_time()}] Running in full mode (all programs)")
+        programs = Programs.objects.all()
+
     commands_to_run = []
 
     for p in programs:
@@ -35,7 +56,6 @@ if __name__ == "__main__":
                 skipped_count += 1
                 continue
                 
-            # لیست ماژول‌های فعال
             modules = [
                 "watch_subfinder.py",
                 "watch_crtsh.py",
@@ -50,13 +70,10 @@ if __name__ == "__main__":
 
     print(f"[{current_time()}] Starting {len(commands_to_run)} enumeration tasks...")
     
-    # دریافت تعداد workerها از متغیر محیطی (پیش‌فرض ۱۰)
     max_workers = int(os.environ.get("ENUM_MAX_WORKERS", 10))
     
-    # ۳. اجرای موازی ماژول‌ها
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         executor.map(run_module, commands_to_run)
         
     print(f"[{current_time()}] All enumeration modules finished. Starting DNS Resolution...")
-
     print(f"[{current_time()}] Watchtower Recon Cycle Completed!")
