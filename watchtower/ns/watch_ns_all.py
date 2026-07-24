@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     program_filter = parse_program_filter(args.program)
 
-    # ۱. واکشی اطلاعات از دیتابیس[cite: 4]
+    # ۱. واکشی اطلاعات از دیتابیس
     if program_filter:
         print(f"[{current_time()}] Running in filtered mode for programs: {', '.join(program_filter)}")
         programs = Programs.objects(program_name__in=program_filter)
@@ -38,8 +38,16 @@ if __name__ == "__main__":
         programs = Programs.objects.all()
     
     for program in programs:
-        for scope in program.scopes:
-            subdomains = Subdomains.objects(scope=scope)
+        # استخراج اسکوپ‌های واقعی این برنامه از کالکشن Subdomains
+        distinct_scopes = Subdomains.objects(program_name=program.program_name).distinct('scope')
+        
+        if not distinct_scopes:
+            print(f"[{current_time()}] No subdomains found in DB for program: {program.program_name}")
+            continue
+
+        for scope in distinct_scopes:
+            # فیلتر هم‌زمان روی scope و program_name برای جلوگیری از تداخل
+            subdomains = Subdomains.objects(scope=scope, program_name=program.program_name)
             if subdomains:
                 print(f"[{current_time()}] Running Dnsx All for scope: {scope}")
                 
@@ -86,5 +94,3 @@ if __name__ == "__main__":
 
                 print(f"[{current_time()}] {scope}: {len(genuine_map)} genuine live, "
                       f"{discarded} discarded (wildcard noise)")
-            else:
-                print(f"[{current_time()}] No subdomains found in DB for scope: {scope}")

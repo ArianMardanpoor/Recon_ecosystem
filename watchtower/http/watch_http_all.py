@@ -18,7 +18,7 @@ if __name__ == "__main__":
 
     program_filter = parse_program_filter(args.program)
 
-    # ۱. واکشی اطلاعات از دیتابیس[cite: 5]
+    # ۱. واکشی اطلاعات از دیتابیس
     if program_filter:
         print(f"[{current_time()}] Running in filtered mode for programs: {', '.join(program_filter)}")
         programs = Programs.objects(program_name__in=program_filter)
@@ -36,8 +36,16 @@ if __name__ == "__main__":
         programs = Programs.objects.all()
     
     for program in programs:
-        for scope in program.scopes:
-            live_subs = LiveSubdomains.objects(scope=scope)
+        # استخراج اسکوپ‌های واقعی این برنامه از کالکشن LiveSubdomains
+        distinct_scopes = LiveSubdomains.objects(program_name=program.program_name).distinct('scope')
+        
+        if not distinct_scopes:
+            print(f"[{current_time()}] No live subdomains found in DB for program: {program.program_name}")
+            continue
+
+        for scope in distinct_scopes:
+            # فیلتر هم‌زمان روی scope و program_name برای جلوگیری از تداخل
+            live_subs = LiveSubdomains.objects(scope=scope, program_name=program.program_name)
             if live_subs:
                 print(f"[{current_time()}] Running Httpx All module for scope: {scope}")
                 
@@ -86,8 +94,6 @@ if __name__ == "__main__":
                     os.unlink(temp_file_path)
                 except:
                     pass
-            else:
-                print(f"[{current_time()}] No live subdomains for scope: {scope}")
 
-    # ارسال تمام نوتیف‌های بافرشده در پایان اسکن[cite: 5]
+    # ارسال تمام نوتیف‌های بافرشده در پایان اسکن
     flush_all()
