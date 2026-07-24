@@ -1,5 +1,7 @@
 # requirements
 ```
+echo "cd /opt/Recon_ecosystem/" >> ~/.bashrc
+source ~/.bashrc
 sudo apt update
 sudo apt install -y ca-certificates curl gnupg
 sudo apt install -y git
