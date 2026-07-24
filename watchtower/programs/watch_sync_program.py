@@ -1,3 +1,4 @@
+# مسیر فایل: watchtower/programs/watch_sync_program.py
 #!/usr/bin/env python3
 import os
 import sys
@@ -10,6 +11,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # اضافه کردن Programs به ایمپورت‌ها برای کوئری گرفتن از دیتابیس
 from database.db import upsert_program, delete_program, Programs
+from utils.scope_classifier import is_url, is_ip_or_cidr
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SyncProgram")
@@ -24,17 +26,30 @@ PROGRAMS_DIR = BASE_DIR / "Programs"
 
 def parse_scopes(scopes):
     """
-    وایلدکاردها رو بررسی میکنه و دو خروجی میده:
+    وایلدکاردها رو بررسی میکنه و چهار خروجی میده:
     1. recon_domains: دامین‌های پایه برای اسکن (بخش بعد از آخرین ستاره)
     2. regex_patterns: پترن‌های رجکس برای فیلتر نتایج نهایی
+    3. pre_resolved_urls: آدرس‌های URL کامل که نباید enum شوند
+    4. ip_ranges: آدرس‌های IP و رنج‌های CIDR
     """
     recon_domains = set()
     regex_patterns = []
+    pre_resolved_urls = set()
+    ip_ranges = set()
 
     for scope in scopes:
         # تبدیل وایلدکارد به رجکس (دات -> \. و ستاره -> .*)
         regex_str = scope.replace('.', r'\.').replace('*', '.*')
         regex_patterns.append(f"^{regex_str}$")
+
+        # فیلتر کردن URLها و IPها
+        if is_url(scope):
+            pre_resolved_urls.add(scope)
+            continue
+            
+        if is_ip_or_cidr(scope):
+            ip_ranges.add(scope)
+            continue
 
         # استخراج دامین پایه برای مراحل ریکان
         if '*' in scope:
@@ -44,7 +59,7 @@ def parse_scopes(scopes):
         else:
             recon_domains.add(scope)
 
-    return list(recon_domains), regex_patterns
+    return list(recon_domains), regex_patterns, list(pre_resolved_urls), list(ip_ranges)
 
 
 def scan_json(directory: Path):
@@ -77,13 +92,15 @@ def scan_json(directory: Path):
                 config_data = data.get("config", {})
 
                 if program_name:
-                    recon_scopes, regex_filters = parse_scopes(scopes)
+                    recon_scopes, regex_filters, pre_resolved_urls, ip_ranges = parse_scopes(scopes)
 
                     config_data["regex_filters"] = regex_filters
                     config_data["original_scopes"] = scopes
+                    config_data["pre_resolved_urls"] = pre_resolved_urls
+                    config_data["ip_ranges"] = ip_ranges
 
                     upsert_program(program_name, recon_scopes, outofscopes, config_data)
-                    logger.info(f"Successfully upserted: {program_name}")
+                    logger.info(f"Successfully upserted: {program_name} (Recon: {len(recon_scopes)}, URLs: {len(pre_resolved_urls)}, IPs: {len(ip_ranges)})")
                     
                     # اضافه کردن اسم برنامه به لیست برنامه‌های فعال
                     active_programs.add(program_name)
