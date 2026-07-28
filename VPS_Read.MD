@@ -23,19 +23,16 @@ git clone https://github.com/ArianMardanpoor/Recon_ecosystem.git
 # config .env
 ```
 cd Recon_ecosystem/
-cp .env.example .env
 vim .env
 ```
 # config watchtower .env
 ```
 cd watchtower/
-cp .env.example .env
 vim .env
 ```
 # config xsscanner .env
 ```
 cd xsscanner/
-cp .env.example .env
 vim .env
 ```
 # build the project and api
