@@ -8,7 +8,7 @@ import sys
 from mongoengine.queryset.visitor import Q
 from database.db import (
     Programs, Subdomains, LiveSubdomains, Http,
-    current_time
+    current_time, get_screenshot_bytes
 )
 
 app = Flask(__name__)
@@ -129,6 +129,8 @@ def serialize_http(h, providers=None):
                 'discovery_source': f.get('discovery_source')
             } for f in findings_list
         ],
+        'has_screenshot': bool(getattr(h, 'screenshot_file_id', None)),
+        'screenshot_date': h.screenshot_date.strftime('%Y-%m-%d %H:%M:%S') if getattr(h, 'screenshot_date', None) else None,
         'created_date': h.created_date.strftime('%Y-%m-%d %H:%M:%S') if h.created_date else None,
         'last_update': h.last_update.strftime('%Y-%m-%d %H:%M:%S') if h.last_update else None
     }
@@ -406,6 +408,7 @@ def get_http():
       - title          : Search in title
       - ip             : Filter by IP
       - has_favicon    : true/false
+      - has_screenshot : true/false
       - has_tech       : true/false — Is technology identified?
       - header_key     : Check existence of a specific header (e.g. Server)
       - header_value   : Header value (combined with header_key)
@@ -523,6 +526,13 @@ def get_http():
     elif has_favicon == 'false':
         q = q.filter(Q(favicon='') | Q(favicon__exists=False))
 
+    # Screenshot Filter
+    has_screenshot = request.args.get('has_screenshot', '').lower()
+    if has_screenshot == 'true':
+        q = q.filter(screenshot_file_id__ne=None).filter(screenshot_file_id__exists=True)
+    elif has_screenshot == 'false':
+        q = q.filter(Q(screenshot_file_id=None) | Q(screenshot_file_id__exists=False))
+
     # Headers Filter
     header_key = request.args.get('header_key', '').strip()
     if header_key:
@@ -630,6 +640,23 @@ def get_http_detail(subdomain):
     providers = provider_doc.providers if provider_doc else []
     
     return jsonify(serialize_http_detail(h, providers))
+
+
+@app.route('/api/http/<subdomain>/screenshot', methods=['GET'])
+def get_screenshot(subdomain):
+    """Retrieve the screenshot for a given subdomain"""
+    h = Http.objects(subdomain=subdomain).first()
+    if not h:
+        return jsonify({'error': 'Not found'}), 404
+        
+    if not getattr(h, 'screenshot_file_id', None):
+        return jsonify({'error': 'No screenshot available'}), 404
+        
+    image_bytes = get_screenshot_bytes(h.screenshot_file_id)
+    if not image_bytes:
+        return jsonify({'error': 'Screenshot file missing'}), 404
+        
+    return app.response_class(image_bytes, mimetype='image/png')
 
 
 # ==========================================
@@ -1191,4 +1218,3 @@ if __name__ == '__main__':
     # In production, run this app using Gunicorn:
     # gunicorn -w 4 -b 127.0.0.1:3131 --timeout 120 app:app
     app.run(host='0.0.0.0', port=3131, debug=False)
-    

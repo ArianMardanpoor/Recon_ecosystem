@@ -2,6 +2,8 @@ from mongoengine import Document, StringField, DateTimeField, ListField, DictFie
 from mongoengine.connection import get_connection
 from pymongo.errors import ConnectionFailure, AutoReconnect, ServerSelectionTimeoutError
 from pymongo import UpdateOne
+from bson.objectid import ObjectId
+import gridfs
 from datetime import datetime
 import tldextract
 import os
@@ -110,6 +112,9 @@ for attempt in range(3):
 if not connection_established:
     print("[!] CRITICAL: Could not establish MongoDB connection", file=sys.stderr)
     sys.exit(1)
+
+# Initialize GridFS bucket for screenshots
+gridfs_bucket = gridfs.GridFSBucket(get_connection(alias="default"), bucket_name="screenshots")
 
 
 def check_db_connection():
@@ -237,6 +242,10 @@ class Http(Document):
     last_scan_date = DateTimeField(default=None, null=True)
     scan_status = StringField(default="not_scanned")
     findings = ListField(DictField(), default=[])
+
+    # Screenshot Storage Fields
+    screenshot_file_id = StringField(default=None, null=True)
+    screenshot_date = DateTimeField(default=None, null=True)
 
     last_update = DateTimeField(default=datetime.now)
     created_date = DateTimeField(default=datetime.now)
@@ -565,6 +574,68 @@ def upsert_scan_findings(subdomain, findings_list, scan_status, force=False):
 
     return True
 
+
+@retry_on_autoreconnect(max_retries=3)
+def upsert_screenshot(subdomain: str, image_bytes: bytes) -> bool:
+    """ذخیره یا بروزرسانی اسکرین‌شات در GridFS"""
+    http_doc = Http.objects(subdomain=subdomain).first()
+
+    if not http_doc:
+        print(f"[{current_time()}] Warning: Cannot upsert screenshot. Http doc not found for: {subdomain}")
+        return False
+
+    if http_doc.screenshot_file_id:
+        try:
+            gridfs_bucket.delete(ObjectId(http_doc.screenshot_file_id))
+        except Exception as e:
+            print(f"[{current_time()}] Warning: Failed to delete old screenshot for {subdomain}: {e}")
+
+    try:
+        new_file_id = gridfs_bucket.upload_from_stream(f"{subdomain}.png", image_bytes)
+        http_doc.screenshot_file_id = str(new_file_id)
+        http_doc.screenshot_date = datetime.now()
+        http_doc.last_update = datetime.now()
+        http_doc.save()
+        print(f"[{current_time()}] Successfully upserted screenshot for {subdomain}")
+        return True
+    except Exception as e:
+        print(f"[{current_time()}] Error: Failed to upload screenshot for {subdomain}: {e}")
+        return False
+
+
+@retry_on_autoreconnect(max_retries=3)
+def get_screenshot_bytes(file_id: str):
+    """دریافت بایت‌های اسکرین‌شات از GridFS"""
+    from typing import Optional
+    try:
+        return gridfs_bucket.open_download_stream(ObjectId(file_id)).read()
+    except Exception:
+        return None
+
+
+@retry_on_autoreconnect(max_retries=3)
+def delete_screenshot(subdomain: str) -> bool:
+    """حذف اسکرین‌شات از GridFS و دیتابیس"""
+    http_doc = Http.objects(subdomain=subdomain).first()
+
+    if not http_doc:
+        print(f"[{current_time()}] Warning: Cannot delete screenshot. Http doc not found for: {subdomain}")
+        return False
+
+    if http_doc.screenshot_file_id:
+        try:
+            gridfs_bucket.delete(ObjectId(http_doc.screenshot_file_id))
+        except Exception as e:
+            print(f"[{current_time()}] Warning: Failed to delete GridFS file for {subdomain}: {e}")
+            pass
+
+        http_doc.screenshot_file_id = None
+        http_doc.screenshot_date = None
+        http_doc.last_update = datetime.now()
+        http_doc.save()
+        print(f"[{current_time()}] Successfully deleted screenshot for {subdomain}")
+
+    return True
 
 # ==========================================
 # Helper function for safe queries
