@@ -3,6 +3,7 @@
 FROM golang:latest AS builder
 
 WORKDIR /build
+ENV GOPROXY=https://goproxy.cn,direct
 
 RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \
