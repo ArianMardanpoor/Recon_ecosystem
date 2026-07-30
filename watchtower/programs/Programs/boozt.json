@@ -1,0 +1,13 @@
+{
+  "program_name": "boozt",
+  "scopes": [
+    "*.boozt.com",
+    "*.booztlet.com",
+    "kronor.io"
+  ],
+  "outofscope": [
+    "analytics.boozt.com",
+    "bmp.boozt.com",
+    "www.kronor.io"
+  ]
+}
