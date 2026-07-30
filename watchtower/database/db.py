@@ -114,7 +114,7 @@ if not connection_established:
     sys.exit(1)
 
 # Initialize GridFS bucket for screenshots
-gridfs_bucket = gridfs.GridFSBucket(get_connection(alias="default"), bucket_name="screenshots")
+gridfs_bucket = gridfs.GridFSBucket(get_connection(alias="default")["watchtower"], bucket_name="screenshots")
 
 
 def check_db_connection():
