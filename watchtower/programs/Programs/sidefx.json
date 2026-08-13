@@ -1,7 +1,0 @@
-{
-  "program_name": "sidefx",
-  "scopes": [
-    "*.sidefx.com"
-  ],
-  "outofscope": []
-}

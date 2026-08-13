@@ -1,0 +1,11 @@
+{
+  "program_name": "whatnot",
+  "scopes": [
+    "www.whatnot.com",
+    "*.whatnot.com",
+    "api.whatnot.com",
+    "live-service.whatnot.com",
+    "auction-service.whatnot.com"
+  ],
+  "outofscope": []
+}
