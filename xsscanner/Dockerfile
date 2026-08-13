@@ -86,10 +86,11 @@ COPY watchtower /watchtower
 COPY xsscanner/param.txt /xsscanner/param.txt
 
 # ساخت محیط مجازی و نصب پیش‌نیازها در مسیر جدید
+# ساخت محیط مجازی، نصب requirements و نصب Chromium همراه با تمام وابستگی‌های سیستمی
 RUN python3 -m venv /watchtower/venv && \
     /watchtower/venv/bin/pip install --no-cache-dir \
-    -r /watchtower/requirements.txt
-RUN /watchtower/venv/bin/playwright install chromium
+    -r /watchtower/requirements.txt && \
+    /watchtower/venv/bin/playwright install --with-deps chromium
 
 # تغییر مسیر پیش‌فرض کانتینر
 WORKDIR /xsscanner
