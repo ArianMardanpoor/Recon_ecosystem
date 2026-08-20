@@ -17,7 +17,6 @@ def run_httpx_bulk(subdomains, domain):
         print(f"[{current_time()}] No live subdomains to scan for {domain}")
         return
     
-    # نوشتن گروهی ساب‌دامین‌ها در فایل موقت جهت افزایش سرعت بیست برابری
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
         for sub in subdomains:
             temp_file.write(f"{sub}\n")
@@ -40,15 +39,24 @@ def run_httpx_bulk(subdomains, domain):
     print(f"{colors.Gray}[{current_time()}] Executing httpx bulk for {len(subdomains)} subdomains...{colors.Reset}")
     results = run_command_safe(command)
     
-    if results:
+    # 1. مدیریت Silent Failure
+    if results is None:
+        print(f"[{current_time()}] [!] Httpx failed or timed out for {domain}. run_command_safe returned None.")
+    elif results:
         for line in results:
             if not line.strip(): continue
             try:
                 json_obj = json.loads(line.strip())
-                # استخراج ساب‌دامین اصلی از ورودی httpx
-                subdomain_name = json_obj.get('input', json_obj.get('vhost', ''))
                 
-                upsert_http({
+                # 3. حل مشکل استرینگ خالی در کلید input با استفاده از عملگر or
+                subdomain_name = json_obj.get('input') or json_obj.get('vhost') or json_obj.get('url', '').replace('https://', '').replace('http://', '').strip('/')
+                
+                if not subdomain_name:
+                    print(f"[{current_time()}] [!] Warning: Could not extract subdomain from httpx output")
+                    continue
+                
+                # 2. بررسی موفقیت‌آمیز بودن ثبت در دیتابیس برای مشکل Scope
+                success = upsert_http({
                     "subdomain": subdomain_name,
                     "scope": domain,
                     "ips": json_obj.get('a', []),
@@ -60,8 +68,15 @@ def run_httpx_bulk(subdomains, domain):
                     "final_url": json_obj.get('final_url', ''),
                     "favicon": json_obj.get('favicon', ''),
                 })
+                
+                if not success:
+                    print(f"[{current_time()}] [!] Failed to upsert HTTP record for {subdomain_name} (Possible scope mismatch or DB error)")
+                    
             except json.JSONDecodeError as e:
-                print(f"[{current_time()}] JSON decode error: {e}")
+                print(f"[{current_time()}] [!] JSON decode error: {e}")
+            except Exception as e:
+                # 4. جلوگیری از کرش کردن برنامه در صورت خطاهای پیش‌بینی نشده (مثل دیتابیس)
+                print(f"[{current_time()}] [!] Unexpected error inserting {subdomain_name if 'subdomain_name' in locals() else 'unknown'}: {e}")
 
     try:
         os.unlink(temp_file_path)
@@ -73,7 +88,7 @@ if __name__ == "__main__":
         print(f"[{current_time()}] Usage: python3 watch_http.py <domain>")
         sys.exit(1)
     
-    domain = sys.argv[1]
+    domain = sys.argv[1].strip() # حذف اسپیس‌های احتمالی از ورودی CLI
     live_subdomains = LiveSubdomains.objects(scope=domain)
     
     if live_subdomains:

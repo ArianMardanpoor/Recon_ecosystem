@@ -1,0 +1,15 @@
+{
+  "program_name": "floqast",
+  "scopes": [
+    "*.eu.floqast.app",
+    "api-eu.floqast.app",
+    "*.floqast.app",
+    "https://*.floqast.engineering"
+  ],
+  "outofscope": [
+    "*.floqast.com",
+    "*.floqast.studio",
+    "Any Asset Not Specifically Listed as In-Scope",
+    "s3://floqast"
+  ]
+}

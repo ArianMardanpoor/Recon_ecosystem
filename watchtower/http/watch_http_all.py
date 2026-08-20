@@ -19,7 +19,6 @@ if __name__ == "__main__":
 
     program_filter = parse_program_filter(args.program)
 
-    # ۱. واکشی اطلاعات از دیتابیس
     if program_filter:
         print(f"[{current_time()}] Running in filtered mode for programs: {', '.join(program_filter)}")
         programs = Programs.objects(program_name__in=program_filter)
@@ -37,7 +36,6 @@ if __name__ == "__main__":
         programs = Programs.objects.all()
     
     for program in programs:
-        # استخراج اسکوپ‌های واقعی این برنامه از کالکشن LiveSubdomains
         distinct_scopes = LiveSubdomains.objects(program_name=program.program_name).distinct('scope')
         
         if not distinct_scopes:
@@ -45,7 +43,6 @@ if __name__ == "__main__":
             continue
 
         for scope in distinct_scopes:
-            # فیلتر هم‌زمان روی scope و program_name برای جلوگیری از تداخل
             live_subs = LiveSubdomains.objects(scope=scope, program_name=program.program_name)
             if live_subs:
                 print(f"[{current_time()}] Running Httpx All module for scope: {scope}")
@@ -71,13 +68,25 @@ if __name__ == "__main__":
 
                 results = run_command_safe(command, timeout=300)
 
-                if results:
+                # 1. مدیریت Silent Failure
+                if results is None:
+                    print(f"[{current_time()}] [!] Httpx failed or timed out for scope: {scope}")
+                elif results:
                     for line in results:
                         if not line.strip(): continue
                         try:
                             json_obj = json.loads(line.strip())
-                            upsert_http({
-                                "subdomain": json_obj.get('input', ''),
+                            
+                            # 3. حل مشکل استرینگ خالی 
+                            subdomain_name = json_obj.get('input') or json_obj.get('vhost') or json_obj.get('url', '').replace('https://', '').replace('http://', '').strip('/')
+                            
+                            if not subdomain_name:
+                                print(f"[{current_time()}] [!] Warning: Could not extract subdomain from httpx output")
+                                continue
+                                
+                            # 2. بررسی موفقیت‌آمیز بودن اینسرت
+                            success = upsert_http({
+                                "subdomain": subdomain_name,
                                 "scope": scope,
                                 "ips": json_obj.get('a', []),
                                 "tech": json_obj.get('tech', []),
@@ -88,13 +97,15 @@ if __name__ == "__main__":
                                 "final_url": json_obj.get('final_url', ''),
                                 "favicon": json_obj.get('favicon', ''),
                             })
+                            if not success:
+                                print(f"[{current_time()}] [!] Failed to upsert HTTP record for {subdomain_name}")
                         except Exception as e:
-                            print(f"[{current_time()}] Error parsing httpx line: {e}")
+                            # 4. جلوگیری از قطع شدن حلقه در صورت کرش‌های غیرمنتظره
+                            print(f"[{current_time()}] [!] Error processing httpx result for {subdomain_name if 'subdomain_name' in locals() else 'unknown'}: {e}")
                 
                 try:
                     os.unlink(temp_file_path)
                 except:
                     pass
 
-    # ارسال تمام نوتیف‌های بافرشده در پایان اسکن
     flush_all()
