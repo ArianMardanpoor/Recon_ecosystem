@@ -9,7 +9,8 @@ import tldextract
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from database.db import upsert_program, delete_program, Programs, bulk_upsert_subdomains
+# ایمپورت retry_on_autoreconnect اضافه شد
+from database.db import upsert_program, delete_program, Programs, bulk_upsert_subdomains, retry_on_autoreconnect
 from utils.scope_classifier import classify_scope
 from utils.cli_helpers import parse_program_filter
 
@@ -117,10 +118,21 @@ def scan_json(directory: Path, program_filter: list = None):
             
     return active_programs
 
+# تابع امن شده برای دریافت برنامه‌ها از دیتابیس
+@retry_on_autoreconnect(max_retries=3)
+def get_db_programs():
+    return set(Programs.objects().distinct('program_name'))
+
 def remove_stale_programs(active_programs):
     logger.info("Checking database for stale programs to delete...")
     try:
-        db_programs = set(Programs.objects().distinct('program_name'))
+        db_programs = get_db_programs()
+        
+        # اگر بعد از ۳ بار تلاش، ارتباط برقرار نشد، اسکریپت دیتایی را به اشتباه پاک نکند
+        if db_programs is None:
+            logger.error("Failed to retrieve programs from DB due to connection issues. Skipping deletion.")
+            return
+            
         programs_to_delete = db_programs - active_programs
         
         if not programs_to_delete:
