@@ -1076,7 +1076,8 @@ func randomString(n int) string {
 // Add to imports: "reconpipeline/pkg/reflectctx"
 
 // reflectionExistsVerified executes the HTTP request and runs the context-aware breakout verification.
-func reflectionExistsVerified(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte) bool {
+// Now returns (isConfirmed bool, isHardFailure bool) to track connection/timeout issues.
+func reflectionExistsVerified(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte) (bool, bool) {
 	ratelimit.Acquire(targetURL)
 
 	finalURL := targetURL
@@ -1097,15 +1098,17 @@ func reflectionExistsVerified(targetURL, method string, headers map[string]strin
 
 	statusCode, respBody, err := curlRequest(finalURL, method, headers, reqBody, 15)
 	if err != nil || statusCode == 0 {
-		return false
+		// Return false for match, true for hard failure (timeout/dead connection)
+		return false, true
 	}
 
 	// ✅ استخراج کانری خام (بدون مارکر) قبل از ارسال به VerifyBreakout
 	bareCanary := reflectctx.ExtractCanary(payload)
 	isConfirmed, _ := reflectctx.VerifyBreakout(respBody, bareCanary, markerChar)
-	return isConfirmed
-}
 
+	// Return the confirmation result, and false for hard failure (since we got a real response)
+	return isConfirmed, false
+}
 func confirmParameter(targetURL, phase, name string) (bool, []string) {
 	prefix := "x9" + randomString(3)
 
@@ -1128,6 +1131,7 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 	}
 
 	var confirmed []string
+	consecutiveFails := 0 // Tracks consecutive hard connection failures
 
 	for _, spec := range specs {
 		method := "GET"
@@ -1156,7 +1160,20 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 			reqBody = string(b)
 		}
 
-		if reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker) {
+		isConfirmed, isHardFail := reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker)
+
+		if isHardFail {
+			consecutiveFails++
+			if consecutiveFails >= 3 {
+				logLine("DEAD-MIDSCAN", X_yellow, "%s: 3 consecutive connection failures during confirm, aborting remaining payloads for parameter %s", targetURL, name)
+				break
+			}
+		} else {
+			// We got a real HTTP response (even if it didn't match), so reset the failure counter
+			consecutiveFails = 0
+		}
+
+		if isConfirmed {
 			confirmed = append(confirmed, spec.payload)
 		}
 	}
@@ -1721,6 +1738,20 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
+	// =====================================================================
+	// GUARD 1: Bail out if the target died during Phase 3 before Phase 4b
+	// =====================================================================
+	targetAlive = isTargetAlive(targetURL)
+	if !targetAlive {
+		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4b, skipping confirm+attack", targetURL)
+		art.TargetAlive = false // Update the artifact so Phase 5 (DOM) also skips safely
+		if report.HasVulns() {
+			tg.notify(report)
+		}
+		logReportFindings(&report)
+		return art
+	}
+
 	// Phase 4b: Triage & Context Confirmation (GET/JSON/header only)
 	confirmedParams := make(map[string]map[string]bool)
 	for p := range p3Findings {
@@ -1777,6 +1808,20 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 			confirmedParams["header"][headerName] = true
 			logLine("CONFIRM", X_green, "Confirmed XSS (header): %s (header: %s)", targetURL, headerName)
 		}
+	}
+
+	// =====================================================================
+	// GUARD 2: Bail out if the target died during Phase 4b before Phase 4
+	// =====================================================================
+	targetAlive = isTargetAlive(targetURL)
+	if !targetAlive {
+		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4, skipping attack", targetURL)
+		art.TargetAlive = false
+		if report.HasVulns() {
+			tg.notify(report)
+		}
+		logReportFindings(&report)
+		return art
 	}
 
 	// Phase 4: Heavy Attack (HTTP: GET/JSON/header)

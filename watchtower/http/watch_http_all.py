@@ -52,19 +52,19 @@ if __name__ == "__main__":
                         temp_file.write(f"{live.subdomain}\n")
                     temp_file_path = temp_file.name
 
-                command = [
-                    "httpx", 
-                    "-l", temp_file.name, 
-                    "-silent", 
-                    "-json", 
-                    "-favicon", 
-                    "-tech-detect", 
-                    "-status-code", 
-                    "-title", 
-                    "-threads", "30", 
-                    "-timeout", "5", 
-                    "-retries", "1"
-                ]
+                    command = [
+                        "/home/arian/go/bin/httpx", 
+                        "-l", temp_file_path, 
+                        "-silent", 
+                        "-json", 
+                        "-favicon", 
+                        "-tech-detect", 
+                        "-status-code", 
+                        "-title", 
+                        "-threads", "30", 
+                        "-timeout", "5", 
+                        "-retries", "1"
+                        ]
 
                 results = run_command_safe(command, timeout=300)
 

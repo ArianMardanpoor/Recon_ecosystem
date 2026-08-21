@@ -23,18 +23,18 @@ def run_httpx_bulk(subdomains, domain):
         temp_file_path = temp_file.name
 
     command = [
-        "httpx",
-        "-l", temp_file_path,
-        "-silent",
-        "-json",
-        "-favicon",
-        "-tech-detect",
-        "-status-code",
-        "-title",
-        "-threads", "30",
-        "-timeout", "5",
-        "-retries", "1"
-    ]
+                "/home/arian/go/bin/httpx",
+                "-l", temp_file_path, 
+                "-silent", 
+                "-json", 
+                "-favicon", 
+                "-tech-detect", 
+                "-status-code", 
+                "-title", 
+                "-threads", "30", 
+                "-timeout", "5", 
+                "-retries", "1"
+            ]
     
     print(f"{colors.Gray}[{current_time()}] Executing httpx bulk for {len(subdomains)} subdomains...{colors.Reset}")
     results = run_command_safe(command)
