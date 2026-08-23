@@ -86,12 +86,14 @@ if [ -n "$PROGRAM_FILTER" ]; then
     run_module "enum/watch_enum_all.py" --program "$PROGRAM_FILTER"
     run_module "ns/watch_ns_all.py" --program "$PROGRAM_FILTER"
     run_module "http/watch_http_all.py" --program "$PROGRAM_FILTER"
+    run_module "maintenance/watch_cleanup_orphans.py" --program "$PROGRAM_FILTER"
 else
     echo "[*] Running in full mode (all programs)"
     run_module "programs/watch_sync_program.py"
     run_module "enum/watch_enum_all.py"
     run_module "ns/watch_ns_all.py"
     run_module "http/watch_http_all.py"
+    run_module "maintenance/watch_cleanup_orphans.py"
 fi
 
 echo "---------------------------------------------------"
