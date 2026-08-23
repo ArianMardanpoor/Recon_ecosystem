@@ -1,7 +1,7 @@
 // Package reporter provides a unified findings pipeline for the recon/XSS toolchain:
-//   1. JSONL append log      -> results/raw_findings.jsonl   (machine-readable)
-//   2. Markdown report       -> results/TARGET_REPORT.md     (human-readable)
-//   3. ASCII stats dashboard -> stdout at end of run
+//  1. JSONL append log      -> results/raw_findings.jsonl   (machine-readable)
+//  2. Markdown report       -> results/TARGET_REPORT.md     (human-readable)
+//  3. ASCII stats dashboard -> stdout at end of run
 package reporter
 
 import (
@@ -132,13 +132,20 @@ func ReadFindings(jsonlPath string) ([]Finding, error) {
 	return out, sc.Err()
 }
 
+// isNoisy checks if a finding has been flagged as a false positive.
+func isNoisy(f Finding) bool {
+	marker := "(Note: No HTTP reflection, possible false positive)"
+	return strings.Contains(f.Context.Location, marker) || strings.Contains(f.ReflectionType, marker)
+}
+
 // isHigh decides whether a finding belongs in the "High Confidence" bucket.
 func isHigh(f Finding) bool {
-	if strings.EqualFold(f.Confidence, "HIGH") {
-		return true
+	// Exclude explicitly flagged noisy findings
+	if isNoisy(f) {
+		return false
 	}
-	rt := strings.ToLower(f.ReflectionType)
-	return strings.Contains(rt, "dom_sink_injection") || strings.Contains(rt, "source_reflection")
+	// Strictly rely on Confidence value
+	return strings.EqualFold(f.Confidence, "HIGH")
 }
 
 // ─── Markdown report ────────────────────────────────────────────────────────
@@ -151,9 +158,11 @@ func GenerateMarkdownReport(jsonlPath, mdPath string) error {
 		return fmt.Errorf("reporter: read findings: %w", err)
 	}
 
-	var high, medium []Finding
+	var high, medium, noisy []Finding
 	for _, f := range findings {
-		if isHigh(f) {
+		if isNoisy(f) {
+			noisy = append(noisy, f)
+		} else if isHigh(f) {
 			high = append(high, f)
 		} else {
 			medium = append(medium, f)
@@ -170,12 +179,15 @@ func GenerateMarkdownReport(jsonlPath, mdPath string) error {
 	}
 	sortFn(high)
 	sortFn(medium)
+	sortFn(noisy)
 
 	var b strings.Builder
 	b.WriteString("# 🎯 Vulnerability Scan Report\n\n")
 	b.WriteString(fmt.Sprintf("_Generated: %s_\n\n", time.Now().Format(time.RFC3339)))
-	b.WriteString(fmt.Sprintf("**Total findings:** %d  |  **High confidence:** %d  |  **Medium/Low:** %d\n\n",
-		len(findings), len(high), len(medium)))
+
+	// Updated summary line to include Noisy/Unverified findings
+	b.WriteString(fmt.Sprintf("**Total findings:** %d  |  **High confidence:** %d  |  **Medium/Low:** %d  |  **Noisy/Unverified:** %d\n\n",
+		len(findings), len(high), len(medium), len(noisy)))
 	b.WriteString("---\n\n")
 
 	writeTable := func(title, emptyMsg string, rows []Finding) {
@@ -209,6 +221,7 @@ func GenerateMarkdownReport(jsonlPath, mdPath string) error {
 
 	writeTable("🔥 High Confidence Targets", "No confirmed reflections or DOM sinks yet.", high)
 	writeTable("🔍 Medium/Low Confidence Targets", "No candidate parameters recorded yet.", medium)
+	writeTable("⚠️ Noisy/Unverified (flagged false-positive)", "No noisy targets found.", noisy)
 
 	if err := os.MkdirAll(filepath.Dir(mdPath), 0755); err != nil {
 		return fmt.Errorf("reporter: mkdir for report: %w", err)
@@ -227,7 +240,7 @@ type DashboardStats struct {
 	ParamsDiscovered int
 	VulnsFound       int // canary-reflected / confirmed
 	ReportPath       string
-	Elapsed         time.Duration
+	Elapsed          time.Duration
 }
 
 // PrintDashboard renders a compact ASCII summary box to stdout.

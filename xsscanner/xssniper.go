@@ -1,5 +1,6 @@
 // FILE: xssniper.go — REFACTORED LOGGING, TECH-AWARE ROUTING & JS RISK DETECTION
 // Changes:
+// - Added WAF Challenge detection without dropping targets
 // - Replaced nuclei with curl_reflect_checker for GET and JSON body reflection checks.
 // - Added curlCheckerExists detection and appropriate logging.
 // - Added helpers: extractReflectedURLsFromCurl, aggregateCurlFindings.
@@ -7,6 +8,7 @@
 // - FIX BUG2: Migrated http-request-to-target functions from net/http to curl-exec to avoid JA3 blocks.
 // - FIX BUG4: Upgraded Phase 4 GET reflection aggregation in aggregateCurlFindings to confirmed severity.
 // - FIX BUG5: Added retry-on-timeout resilience to curlRequest HTTP helper.
+// - Added: HTTP Headers parsing via curl -i, CSP extraction, and Severity downgrade (confirmed -> likely) if strict CSP is present.
 
 package main
 
@@ -32,7 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic" // <-- ADD THIS
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -44,13 +46,46 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) " +
 	"Chrome/126.0.0.0 Safari/537.36"
 
+// ── WAF Challenge Detection ──────────────────────────────────────────────────
+
+var wafChallengeDetected int64
+
+func detectWAFChallenge(statusCode int, body []byte) bool {
+	limit := 8192
+	if len(body) < limit {
+		limit = len(body)
+	}
+	window := bytes.ToLower(body[:limit])
+
+	fingerprints := []string{
+		"cf-browser-verification",
+		"attention required! | cloudflare",
+		"just a moment...",
+		"request unsuccessful. incapsula",
+		"__cf_chl_",
+		"sucuri_cloudproxy_js",
+	}
+
+	for _, fp := range fingerprints {
+		if bytes.Contains(window, []byte(fp)) {
+			return true
+		}
+	}
+
+	if bytes.Contains(window, []byte("access denied")) && bytes.Contains(window, []byte("akamai")) {
+		return true
+	}
+
+	return false
+}
+
 // ── Curl Request Helper ──────────────────────────────────────────────────────
 
-// FIX BUG5: Helper function executing a single curl request attempt.
-func curlRequestAttempt(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
+func curlRequestAttempt(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respHeaders map[string]string, respBody []byte, err error) {
 	args := []string{
 		"-s",
 		"-L",
+		"-i", // اضافه شدن فلگ -i برای دریافت هدرهای HTTP
 		"--max-time", strconv.Itoa(timeout),
 		"-A", userAgent,
 		"-w", "\\nHTTPSTATUS:%{http_code}",
@@ -62,14 +97,12 @@ func curlRequestAttempt(targetURL, method string, headers map[string]string, bod
 		args = append(args, "-X", "POST")
 		args = append(args, "-H", "Content-Type: application/json")
 		if body != "" {
-			// Using --data-raw to ensure special break characters (&, <, ', etc.) are not mangled
 			args = append(args, "--data-raw", body)
 		}
 	} else if method != "GET" && method != "" {
 		args = append(args, "-X", method)
 	}
 
-	// FIX BUG2: Always add Cache-Busting headers centrally
 	args = append(args, "-H", "Cache-Control: no-cache, no-store, must-revalidate")
 	args = append(args, "-H", "Pragma: no-cache")
 
@@ -91,33 +124,85 @@ func curlRequestAttempt(targetURL, method string, headers map[string]string, bod
 	marker := []byte("\nHTTPSTATUS:")
 	idx := bytes.LastIndex(stdout, marker)
 	if idx < 0 {
-		return 0, nil, fmt.Errorf("curl failed or no marker: %v (stderr: %s)", cmdErr, stderrBuf.String())
+		return 0, nil, nil, fmt.Errorf("curl failed or no marker: %v (stderr: %s)", cmdErr, stderrBuf.String())
 	}
 
-	respBody = stdout[:idx]
 	statusStr := strings.TrimSpace(string(stdout[idx+len(marker):]))
 	statusCode, atoiErr := strconv.Atoi(statusStr)
 	if atoiErr != nil {
-		return 0, respBody, fmt.Errorf("unparseable status %q", statusStr)
+		return 0, nil, nil, fmt.Errorf("unparseable status %q", statusStr)
 	}
 
 	if statusCode == 0 {
-		return 0, respBody, fmt.Errorf("connection failed (status 000)")
+		return 0, nil, nil, fmt.Errorf("connection failed (status 000)")
 	}
 
-	return statusCode, respBody, nil
+	// پارس کردن هدرها و جدا کردن بادی (با در نظر گرفتن ریدایرکت‌ها)
+	rawOutput := stdout[:idx]
+	respHeaders = make(map[string]string)
+	offset := 0
+	for {
+		// رد شدن از کاراکترهای خالی ابتدای پاسخ
+		for offset < len(rawOutput) && (rawOutput[offset] == '\r' || rawOutput[offset] == '\n') {
+			offset++
+		}
+		if offset >= len(rawOutput) {
+			break
+		}
+		// بررسی شروع بخش هدر HTTP
+		if !bytes.HasPrefix(rawOutput[offset:], []byte("HTTP/")) {
+			break
+		}
+		end := bytes.Index(rawOutput[offset:], []byte("\r\n\r\n"))
+		if end == -1 {
+			break
+		}
+		block := string(rawOutput[offset : offset+end])
+		lines := strings.Split(block, "\n")
+		// ریست کردن هدرها در صورت وجود ریدایرکت تا فقط هدرهای پاسخ نهایی باقی بماند
+		respHeaders = make(map[string]string)
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if sepIdx := strings.Index(line, ":"); sepIdx > 0 {
+				key := strings.ToLower(strings.TrimSpace(line[:sepIdx]))
+				val := strings.TrimSpace(line[sepIdx+1:])
+				respHeaders[key] = val
+			}
+		}
+		offset += end + 4
+	}
+	respBody = rawOutput[offset:]
+
+	return statusCode, respHeaders, respBody, nil
 }
 
-// FIX BUG2: curlRequest issues an HTTP request via the curl binary (exec'd) instead
-// of Go's net/http, to avoid JA3/TLS fingerprinting blocks by WAFs.
-// FIX BUG5: Retry-on-timeout resilience — if the initial attempt returns an error or status 0,
-// retry once with double the original timeout before returning failure.
-func curlRequest(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respBody []byte, err error) {
-	statusCode, respBody, err = curlRequestAttempt(targetURL, method, headers, body, timeout)
+func curlRequest(targetURL, method string, headers map[string]string, body string, timeout int) (statusCode int, respHeaders map[string]string, respBody []byte, err error) {
+	statusCode, respHeaders, respBody, err = curlRequestAttempt(targetURL, method, headers, body, timeout)
 	if err != nil || statusCode == 0 {
 		return curlRequestAttempt(targetURL, method, headers, body, timeout*2)
 	}
-	return statusCode, respBody, nil
+	return statusCode, respHeaders, respBody, nil
+}
+
+func extractCSP(headers map[string]string) (allowsInline bool, hasCSP bool) {
+	cspStr := ""
+	for k, v := range headers {
+		if k == "content-security-policy" {
+			cspStr = v
+			hasCSP = true
+			break
+		}
+	}
+	if !hasCSP {
+		return true, false // اگر CSP ندارد، عملاً inline باز است
+	}
+
+	cspLower := strings.ToLower(cspStr)
+	if strings.Contains(cspLower, "'unsafe-inline'") {
+		return true, true
+	}
+
+	return false, true
 }
 
 // ── Tech Profile & Classification ───────────────────────────────────────────
@@ -155,17 +240,12 @@ func classifyTechProfile(techList []string) TechProfile {
 
 // ── Client-Side JS Risk Detection ──────────────────────────────────────────
 
-// hasClientSideJSRisk performs a quick GET request to check if the target has ANY scripts.
-// If it fails or times out, it conservatively returns true (assume JS exists).
 func hasClientSideJSRisk(targetURL string) bool {
 	ratelimit.Acquire(targetURL)
-
-	// FIX BUG2: Replaced net/http logic with curlRequest helper
-	statusCode, respBody, err := curlRequest(targetURL, "GET", nil, "", 15)
+	statusCode, _, respBody, err := curlRequest(targetURL, "GET", nil, "", 15)
 	if err != nil || statusCode == 0 {
 		return true // conservative fallback
 	}
-
 	bodyLower := strings.ToLower(string(respBody))
 	return strings.Contains(bodyLower, "<script")
 }
@@ -205,7 +285,7 @@ func severityToConfidence(sev string) string {
 		return "HIGH"
 	case "likely":
 		return "MEDIUM"
-	default: // "possible"
+	default:
 		return "LOW"
 	}
 }
@@ -546,13 +626,10 @@ func severityWeight(s string) int {
 
 func verifyReflection(targetURL, method string, headers map[string]string, body, canary string) bool {
 	ratelimit.Acquire(targetURL)
-
-	// FIX BUG2: Replaced net/http setup with curlRequest helper
-	statusCode, respBody, err := curlRequest(targetURL, method, headers, body, 15)
+	statusCode, _, respBody, err := curlRequest(targetURL, method, headers, body, 15)
 	if err != nil || statusCode == 0 {
 		return false
 	}
-
 	return strings.Contains(string(respBody), canary)
 }
 
@@ -656,7 +733,6 @@ func dedupeConfirmedURLs(urls []string) []string {
 	return unique
 }
 
-// Helper to send the formatted Telegram message using the existing envelope configuration
 func (tg *Telegram) sendMessage(text string) {
 	if tg == nil {
 		return
@@ -684,7 +760,6 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 		atomic.AddInt64(&vulnerableTargets, 1)
 	}
 
-	// 1. Terminal Output and File Write (Always triggers for any finding)
 	reportJSON, _ := json.MarshalIndent(report, "", "  ")
 	formatted := dedupeNucleiFindings(report)
 
@@ -698,7 +773,6 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 	fileName := filepath.Join(vulnDir, safeNameStr+".json")
 	os.WriteFile(fileName, reportJSON, 0644)
 
-	// 2. Evaluate Findings for Telegram Push
 	if tg == nil {
 		return
 	}
@@ -726,27 +800,21 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 		}
 	}
 
-	// If all findings are known-noisy DOM false positives, suppress Telegram notification completely.
 	if totalVulns > 0 && totalVulns == noisyDOMVulns {
 		return
 	}
 
 	ts := time.Now().Format("2006-01-02 15:04:05")
 
-	// 3. Dispatch appropriate message types
 	if hasConfirmed {
-		// PATH A: High-Urgency Confirmed Finding
 		var sb strings.Builder
 		sb.WriteString("🚨 <b>CONFIRMED XSS</b>\n\n")
 		sb.WriteString(fmt.Sprintf("🎯 <b>Target:</b> <code>%s</code>\n", escapeHTML(report.URL)))
 		sb.WriteString(fmt.Sprintf("📅 <b>Time:</b> %s\n\n", ts))
 		sb.WriteString(fmt.Sprintf("<pre>%s</pre>", escapeHTML(string(reportJSON))))
-
 		tg.sendMessage(sb.String())
 
 	} else if hasValidCandidate {
-		// PATH B: Lower-key Candidate Finding (Likely/Possible)
-		// Ensure we only spam this candidate summary once per target URL per run.
 		if _, loaded := candidateNotified.LoadOrStore(report.URL, true); !loaded {
 			var sb strings.Builder
 			sb.WriteString("🔎 <b>Candidate findings</b>\n\n")
@@ -804,8 +872,8 @@ var (
 	forceAll             bool
 	concurrency          int
 	workers              int
-	domScanEnabled       bool // NEW: Enable DOM/headless sink checks
-	fastWorkers          int  // NEW: concurrency for the fast HTTP-reflection pipeline (-fast-workers)
+	domScanEnabled       bool
+	fastWorkers          int
 	mu                   sync.Mutex
 	tg                   *Telegram
 	allCrawledURLs       []string
@@ -818,14 +886,12 @@ var (
 	candidateNotified    sync.Map
 	nucleiExists         bool
 	domSinkCheckerExists bool
-	curlCheckerExists    bool // NEW: check for curl_reflect_checker binary
+	curlCheckerExists    bool
 	skipSPA              bool
 
 	consecutiveDead int64
+	phase           int
 
-	phase int
-
-	// Replace the old reX9 definition with this:
 	reX9       = regexp.MustCompile(`(?:<b9|['"])?x9(?:canary)?[a-z]*(?:['"\;<{]|\{\{)?`)
 	rePayload  = regexp.MustCompile(`\[(?:"([^"]+)"|([^"\]]+))\]$`)
 	reANSI     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
@@ -895,19 +961,6 @@ func isConcreteURL(rawURL string) bool {
 	return true
 }
 
-// isTargetAlive checks whether a target responds at all. It is intentionally
-// lenient:
-//   - Any real HTTP status code — including 4xx and 5xx — counts as "alive",
-//     because an error-page response can still contain a reflected/exploitable
-//     payload in its body (a 500 does not mean the target is unreachable or safe).
-//   - Only a hard connection failure or timeout on every attempt below is
-//     treated as dead. A single slow response must not permanently mark a
-//     live target as dead for the rest of the pipeline.
-//
-// It tries HEAD then GET, each at aliveProbeTimeout and then again at
-// aliveProbeTimeout*2, before giving up. This absorbs one-off slow responses
-// from servers with high baseline latency instead of bailing after a single
-// 5-second attempt.
 func isTargetAlive(targetURL string) bool {
 	ratelimit.Acquire(targetURL)
 
@@ -929,19 +982,20 @@ func isTargetAlive(targetURL string) bool {
 	}
 
 	for i, a := range attempts {
-		statusCode, _, _ := curlRequest(checkURL, a.method, nil, "", a.timeout)
+		statusCode, _, respBody, _ := curlRequest(checkURL, a.method, nil, "", a.timeout)
 
 		if statusCode == 0 {
-			// Connection failure or timeout on this attempt — try the next
-			// one (longer timeout / different method) before giving up.
 			if i == len(attempts)-1 {
 				return false
 			}
 			continue
 		}
 
-		// Any real HTTP response, including 4xx/5xx, means the target is
-		// alive. Do NOT gate on status code ranges here.
+		if detectWAFChallenge(statusCode, respBody) {
+			atomic.AddInt64(&wafChallengeDetected, 1)
+			logLine("WAF-CHALLENGE", X_yellow, "WAF Challenge page detected on %s", targetURL)
+		}
+
 		return true
 	}
 
@@ -957,13 +1011,6 @@ func checkConnectivity() bool {
 	return true
 }
 
-// runCommandTimeout is the hard ceiling for any subprocess launched via
-// runCommand (dom_sink_checker, x9, curl_reflect_checker, nuclei, etc).
-// This exists because subprocess-internal timeouts (e.g. dom_sink_checker's
-// own -timeout flag, or a curl --max-time) do not always fire reliably —
-// e.g. a headless Chrome instance can hang past its own configured timeout
-// due to a stuck render/navigate call. Without this outer guard, a single
-// slow/hung target can block the whole pipeline indefinitely.
 var runCommandTimeout = 5 * time.Minute
 
 func runCommand(name string, args ...string) (string, error) {
@@ -975,10 +1022,6 @@ func runCommand(name string, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	// Put the subprocess in its own process group so that if we have to
-	// kill it on timeout, we also kill any children it spawned (e.g.
-	// dom_sink_checker's headless Chrome + the leakless launcher process),
-	// not just the direct child.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var out bytes.Buffer
@@ -988,8 +1031,6 @@ func runCommand(name string, args ...string) (string, error) {
 	err := cmd.Run()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		// Best-effort: kill the whole process group, not just cmd.Process,
-		// so orphaned Chrome/leakless children don't keep running.
 		if cmd.Process != nil {
 			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
@@ -1031,7 +1072,6 @@ func isGenericReflector(targetURL string) bool {
 	q.Set("xprobe4", "CANARY_D")
 	q.Set("xprobe5", "CANARY_E")
 
-	// Cache-Busting param for isGenericReflector
 	cbName := "_cb"
 	_, exists := q[cbName]
 	for exists {
@@ -1045,8 +1085,7 @@ func isGenericReflector(targetURL string) bool {
 
 	ratelimit.Acquire(finalURL)
 
-	// FIX BUG2: Use curlRequest
-	statusCode, respBody, err := curlRequest(finalURL, "GET", nil, "", 10)
+	statusCode, _, respBody, err := curlRequest(finalURL, "GET", nil, "", 10)
 	if err != nil || statusCode == 0 {
 		return false
 	}
@@ -1073,11 +1112,7 @@ func randomString(n int) string {
 	return string(s)
 }
 
-// Add to imports: "reconpipeline/pkg/reflectctx"
-
-// reflectionExistsVerified executes the HTTP request and runs the context-aware breakout verification.
-// Now returns (isConfirmed bool, isHardFailure bool) to track connection/timeout issues.
-func reflectionExistsVerified(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte) (bool, bool) {
+func reflectionExistsVerified(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte) (bool, bool, map[string]string) {
 	ratelimit.Acquire(targetURL)
 
 	finalURL := targetURL
@@ -1096,20 +1131,18 @@ func reflectionExistsVerified(targetURL, method string, headers map[string]strin
 		}
 	}
 
-	statusCode, respBody, err := curlRequest(finalURL, method, headers, reqBody, 15)
+	statusCode, respHeaders, respBody, err := curlRequest(finalURL, method, headers, reqBody, 15)
 	if err != nil || statusCode == 0 {
-		// Return false for match, true for hard failure (timeout/dead connection)
-		return false, true
+		return false, true, nil
 	}
 
-	// ✅ استخراج کانری خام (بدون مارکر) قبل از ارسال به VerifyBreakout
 	bareCanary := reflectctx.ExtractCanary(payload)
 	isConfirmed, _ := reflectctx.VerifyBreakout(respBody, bareCanary, markerChar)
 
-	// Return the confirmation result, and false for hard failure (since we got a real response)
-	return isConfirmed, false
+	return isConfirmed, false, respHeaders
 }
-func confirmParameter(targetURL, phase, name string) (bool, []string) {
+
+func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool) {
 	prefix := "x9" + randomString(3)
 
 	type pSpec struct {
@@ -1117,7 +1150,6 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 		marker  byte
 	}
 
-	// Matches x9.go's generated payload suite, including leading variants
 	specs := []pSpec{
 		{prefix + "'", '\''},
 		{prefix + "\"", '"'},
@@ -1131,7 +1163,8 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 	}
 
 	var confirmed []string
-	consecutiveFails := 0 // Tracks consecutive hard connection failures
+	var finalHasCSP, finalAllowsInline bool
+	consecutiveFails := 0
 
 	for _, spec := range specs {
 		method := "GET"
@@ -1160,7 +1193,7 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 			reqBody = string(b)
 		}
 
-		isConfirmed, isHardFail := reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker)
+		isConfirmed, isHardFail, respHeaders := reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker)
 
 		if isHardFail {
 			consecutiveFails++
@@ -1169,24 +1202,24 @@ func confirmParameter(targetURL, phase, name string) (bool, []string) {
 				break
 			}
 		} else {
-			// We got a real HTTP response (even if it didn't match), so reset the failure counter
 			consecutiveFails = 0
 		}
 
 		if isConfirmed {
 			confirmed = append(confirmed, spec.payload)
+			allowsInline, hasCSP := extractCSP(respHeaders)
+			finalHasCSP = hasCSP
+			finalAllowsInline = allowsInline
 		}
 	}
-	return len(confirmed) > 0, confirmed
+	return len(confirmed) > 0, confirmed, finalHasCSP, finalAllowsInline
 }
 
 func reflectionExists(targetURL, method string, headers map[string]string, body, payload string) bool {
-	// ۱. گرفتن اجازه (Token) قبل از شروع هر درخواست شبکه برای این دامنه
 	ratelimit.Acquire(targetURL)
 
 	finalURL := targetURL
 
-	// Cache-Busting param for GET requests in reflection check
 	if method == "GET" {
 		if u, err := url.Parse(targetURL); err == nil {
 			q := u.Query()
@@ -1203,8 +1236,7 @@ func reflectionExists(targetURL, method string, headers map[string]string, body,
 		}
 	}
 
-	// FIX BUG2: Use curlRequest
-	statusCode, respBody, err := curlRequest(finalURL, method, headers, body, 15)
+	statusCode, _, respBody, err := curlRequest(finalURL, method, headers, body, 15)
 	if err != nil || statusCode == 0 {
 		return false
 	}
@@ -1217,7 +1249,6 @@ func checkHeaderReflection(targetURL, headerName, headerValue string) bool {
 	return reflectionExists(targetURL, "GET", headers, "", headerValue)
 }
 
-// extractBreakChars returns unique break characters found in a canary value.
 func extractBreakChars(val string) []string {
 	idx := strings.LastIndex(val, "x9")
 	if idx == -1 {
@@ -1250,8 +1281,6 @@ func fileExists(path string) bool {
 
 // ── New helpers for curl_reflect_checker ──────────────────────────────────
 
-// extractReflectedURLsFromCurl parses the JSON-line output of curl_reflect_checker
-// and returns a slice of URLs that had a reflection (Sinks contains "body_reflection").
 func extractReflectedURLsFromCurl(output string) []string {
 	var urls []string
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -1264,7 +1293,6 @@ func extractReflectedURLsFromCurl(output string) []string {
 		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
 			continue
 		}
-		// Check if reflection was found
 		found := false
 		for _, sink := range domOut.Sinks {
 			if sink == "body_reflection" {
@@ -1279,24 +1307,19 @@ func extractReflectedURLsFromCurl(output string) []string {
 	return urls
 }
 
-// aggregateCurlFindings adds findings from curl_reflect_checker output (already parsed as reflectedURLs)
-// to the report. It handles "get" and "json" phases with appropriate verification for JSON.
 func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, phase string, targetBase string) {
 	if len(reflectedURLs) == 0 {
 		return
 	}
 
-	// Map to deduplicate by parameter name
 	paramMap := make(map[string]*Vulnerability)
 
 	for _, u := range reflectedURLs {
-		// Extract payload (canary) from URL
 		payload := reX9.FindString(u)
 		if payload == "" {
 			continue
 		}
 
-		// Parse URL to find which query parameter contains the payload
 		parsed, err := url.Parse(u)
 		if err != nil {
 			continue
@@ -1314,15 +1337,12 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 			}
 		}
 		if paramName == "" {
-			continue // cannot determine injection point
+			continue
 		}
 
 		switch phase {
 		case "get":
-			// FIX BUG4: Phase 4 GET findings from curl_reflect_checker matched raw, unescaped break-char
-			// canary patterns directly, which means they are confirmed reflected XSS candidates.
 			if existing, ok := paramMap[paramName]; ok {
-				// Merge payloads
 				exists := false
 				for _, p := range existing.Payloads {
 					if p == payload {
@@ -1333,7 +1353,6 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				if !exists {
 					existing.Payloads = append(existing.Payloads, payload)
 				}
-				// Upgrade severity if needed and mark as confirmed
 				if severityWeight("confirmed") > severityWeight(existing.Severity) {
 					existing.Severity = "confirmed"
 				}
@@ -1347,23 +1366,18 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				}
 			}
 		case "json":
-			// For JSON, we need to verify via POST with JSON body.
-			// Build the clean target URL (without the query param containing the canary)
 			cleanURL := *parsed
 			q := cleanURL.Query()
 			q.Del(paramName)
 			cleanURL.RawQuery = q.Encode()
 			cleanTarget := cleanURL.String()
 
-			// Construct JSON body: {"paramName": "payload"}
 			jsonBody := fmt.Sprintf(`{"%s":"%s"}`, paramName, payload)
 
-			// Call verifyReflection (POST)
 			if !verifyReflection(cleanTarget, "POST", nil, jsonBody, payload) {
-				continue // skip if no reflection in POST
+				continue
 			}
 
-			// Add to JSONBody
 			if existing, ok := paramMap[paramName]; ok {
 				exists := false
 				for _, p := range existing.Payloads {
@@ -1375,7 +1389,6 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				if !exists {
 					existing.Payloads = append(existing.Payloads, payload)
 				}
-				// Ensure severity is "likely"
 				if existing.Severity != "likely" {
 					existing.Severity = "likely"
 				}
@@ -1390,18 +1403,15 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 		}
 	}
 
-	// Now append the deduplicated entries to the appropriate report slice
 	if len(paramMap) > 0 {
 		targetSlice := &report.QueryParameters
 		if phase == "json" {
 			targetSlice = &report.JSONBody
 		}
 		for _, vuln := range paramMap {
-			// Check if already exists in the report (by name)
 			found := false
 			for i, existing := range *targetSlice {
 				if existing.Name == vuln.Name {
-					// Merge payloads
 					for _, p := range vuln.Payloads {
 						exists := false
 						for _, ep := range existing.Payloads {
@@ -1414,11 +1424,9 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 							(*targetSlice)[i].Payloads = append((*targetSlice)[i].Payloads, p)
 						}
 					}
-					// Upgrade severity if needed
 					if severityWeight(vuln.Severity) > severityWeight(existing.Severity) {
 						(*targetSlice)[i].Severity = vuln.Severity
 					}
-					// FIX BUG4: Propagate Confirmed flag when merging into existing report entries
 					if vuln.Confirmed {
 						(*targetSlice)[i].Confirmed = true
 					}
@@ -1433,51 +1441,22 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 	}
 }
 
-// ── ProbeArtifacts ────────────────────────────────────────────────────────
-//
-// ProbeArtifacts carries everything the slow DOM/headless pipeline needs
-// from the fast HTTP-reflection pipeline for a single target, so the two
-// pipelines can be scheduled independently (different worker pools, no
-// blocking between them) while still cooperating on producing one coherent
-// picture per URL (e.g. the combined -phase 3 triage file).
 type ProbeArtifacts struct {
-	TargetURL string
-	Index     int
-	Total     int
-
-	Profile     TechProfile
-	HasJS       bool
-	TargetAlive bool
-
-	ProbeOutputBase   string // base path for x9 -probe output (…-probe-out); DOM stage reads ProbeOutputBase+".dom.canary"
-	DomQueryProbeFile string // path to the dom-query-probe.txt file generated in Phase 2
-
-	// TriageOnly is set when running with -phase 3: the fast pipeline stops
-	// after its own Phase 3 work and hands off just enough data for the DOM
-	// pipeline to write the single combined triage_<target>.txt file once its
-	// own (DOM) Phase 3 work finishes.
-	TriageOnly       bool
-	GetParamSet      map[string]bool
-	GetReflectedRaw  []string // raw reflected URLs from curl_reflect_checker (phase "get"), used to recompute break_chars for triage
-	CandidateHeaders []string
-
-	// Skip tells the DOM pipeline there is nothing further to do for this
-	// target: unparseable URL, duplicate (workerLock already held), SPA-skip,
-	// generic-reflector-skip, or a -phase < 3 run that only wanted probe
-	// files generated. Targets with Skip=true are never enqueued to the DOM
-	// pipeline at all (see main()), but the field is kept for safety/clarity.
-	Skip bool
+	TargetURL         string
+	Index             int
+	Total             int
+	Profile           TechProfile
+	HasJS             bool
+	TargetAlive       bool
+	ProbeOutputBase   string
+	DomQueryProbeFile string
+	TriageOnly        bool
+	GetParamSet       map[string]bool
+	GetReflectedRaw   []string
+	CandidateHeaders  []string
+	Skip              bool
 }
 
-// ── processURLFast (HTTP reflection pipeline: GET/JSON/header) ─────────────
-//
-// processURLFast handles everything that is pure HTTP request/response work:
-// probe file generation (Phase 2), GET/JSON/header reflection checks via
-// curl_reflect_checker (Phase 3), confirmation (Phase 4b) and the heavy
-// GET/JSON/header attack (Phase 4). It notifies/logs its own findings the
-// moment they're ready and returns a ProbeArtifacts struct so the DOM/
-// headless pipeline (processURLDom) can pick up where it left off,
-// completely decoupled from this pipeline's own scheduling.
 func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	art := ProbeArtifacts{TargetURL: targetURL, Index: index, Total: total}
 
@@ -1520,14 +1499,12 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// Tech-Aware Profile Classification (for Header Injection only)
 	techListStr := strings.Split(techFlag, ",")
 	profile := classifyTechProfile(techListStr)
 	art.Profile = profile
 
 	report := VulnerabilityReport{URL: targetURL}
 
-	// Phase 2: Canary Probe
 	probeInput := filepath.Join(outputDir, safeName(targetURL)+"-probe-in.txt")
 	os.WriteFile(probeInput, []byte(targetURL), 0644)
 
@@ -1541,9 +1518,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	xArgs = append(xArgs, "-i", probeInput, "-o", probeOutputBase)
 	runCommand("./x9", xArgs...)
 
-	// Phase 2: Canary Probing - DOM query params. NOTE: only the probe FILE
-	// is generated here; the actual dom_sink_checker execution against it
-	// happens in the DOM/headless pipeline (processURLDom).
 	domQueryProbeFile := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-probe.txt")
 	art.DomQueryProbeFile = domQueryProbeFile
 	paramsToProbe := []string{}
@@ -1592,7 +1566,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// Phase 3: Filter Vulnerable Parameters (HTTP-only: GET/JSON/header)
 	targetAlive := isTargetAlive(targetURL)
 	var hasJS bool
 	if targetAlive {
@@ -1610,8 +1583,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	art.TargetAlive = targetAlive
 	art.HasJS = hasJS
 
-	// NOTE: the ".dom.canary" probe file is intentionally NOT processed here
-	// anymore — that dom_sink_checker call now happens in processURLDom.
 	probeFiles := map[string]string{
 		probeOutputBase + ".get":    "get",
 		probeOutputBase + ".json":   "json",
@@ -1624,7 +1595,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	for pf, probePhase := range probeFiles {
 		if _, err := os.Stat(pf); err == nil {
 
-			// TECH-AWARE: Skip Header parsing logic if SPA
 			if probePhase == "header" {
 				if profile.IsSPA && !forceAll {
 					logLine("SKIP-TECH", X_cyan, "Skipping header injection for %s due to detected SPA tech: %s", targetURL, techFlag)
@@ -1670,7 +1640,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 				file.Close()
 
 			} else {
-				// Phase 3: use curl_reflect_checker for GET and JSON probe files
 				if curlCheckerExists {
 					res, err := runCommand("./curl_reflect_checker", "-l", pf)
 					if err != nil {
@@ -1709,8 +1678,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	headers := candidateHeaders
 	sort.Strings(headers)
 
-	// Hand off everything the DOM pipeline needs for the combined -phase 3
-	// triage output, regardless of what phase we're running at.
 	art.GetParamSet = getParamSet
 	art.GetReflectedRaw = append([]string(nil), p3Findings["get"]...)
 	art.CandidateHeaders = append([]string(nil), headers...)
@@ -1738,13 +1705,10 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// =====================================================================
-	// GUARD 1: Bail out if the target died during Phase 3 before Phase 4b
-	// =====================================================================
 	targetAlive = isTargetAlive(targetURL)
 	if !targetAlive {
 		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4b, skipping confirm+attack", targetURL)
-		art.TargetAlive = false // Update the artifact so Phase 5 (DOM) also skips safely
+		art.TargetAlive = false
 		if report.HasVulns() {
 			tg.notify(report)
 		}
@@ -1752,7 +1716,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// Phase 4b: Triage & Context Confirmation (GET/JSON/header only)
 	confirmedParams := make(map[string]map[string]bool)
 	for p := range p3Findings {
 		confirmedParams[p] = make(map[string]bool)
@@ -1763,10 +1726,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		for _, u := range urls {
 			dummy += "[canary] [info] " + u + " [x9canary]\n"
 		}
-		// Aggregate directly into the function's real report — not a
-		// throwaway local — so confirmed findings actually survive to the
-		// tg.notify(report)/logReportFindings(&report) calls at the end of
-		// this function.
 		report.aggregateFindings(dummy, probePhase)
 
 		var vList *[]Vulnerability
@@ -1778,14 +1737,21 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 
 		if vList != nil {
-			// Iterate by index so mutations (Confirmed/Severity/Payloads)
-			// persist on the actual slice elements, not on a loop-variable
-			// copy that gets discarded.
 			for i := range *vList {
 				name := (*vList)[i].Name
-				if ok, p := confirmParameter(targetURL, probePhase, name); ok {
+				if ok, p, hasCSP, allowsInline := confirmParameter(targetURL, probePhase, name); ok {
 					(*vList)[i].Confirmed = true
-					(*vList)[i].Severity = "confirmed"
+
+					if hasCSP && !allowsInline {
+						(*vList)[i].Severity = "likely"
+						note := " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+						if !strings.Contains((*vList)[i].Name, note) {
+							(*vList)[i].Name += note
+						}
+					} else {
+						(*vList)[i].Severity = "confirmed"
+					}
+
 					(*vList)[i].Payloads = p
 					confirmedParams[probePhase][name] = true
 				}
@@ -1794,10 +1760,18 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	}
 
 	for _, headerName := range candidateHeaders {
-		if ok, payloads := confirmParameter(targetURL, "header", headerName); ok {
+		if ok, payloads, hasCSP, allowsInline := confirmParameter(targetURL, "header", headerName); ok {
+			severity := "confirmed"
+			name := headerName
+
+			if hasCSP && !allowsInline {
+				severity = "likely"
+				name += " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+			}
+
 			v := Vulnerability{
-				Name:      headerName,
-				Severity:  "confirmed",
+				Name:      name,
+				Severity:  severity,
 				Confirmed: true,
 				Payloads:  payloads,
 			}
@@ -1810,9 +1784,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 	}
 
-	// =====================================================================
-	// GUARD 2: Bail out if the target died during Phase 4b before Phase 4
-	// =====================================================================
 	targetAlive = isTargetAlive(targetURL)
 	if !targetAlive {
 		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4, skipping attack", targetURL)
@@ -1824,7 +1795,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// Phase 4: Heavy Attack (HTTP: GET/JSON/header)
 	httpAtkUrls := []string{}
 	for probePhase, urls := range p3Findings {
 		for _, u := range urls {
@@ -1862,7 +1832,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-http")
 		runCommand("./x9", "-i", atkIn, "-json", "-headers", "-o", finalX9Base)
 
-		// Phase 4: use curl_reflect_checker for .get and .json attack files with -xss flag
 		exts := map[string]string{".get": "get", ".json": "json"}
 		for ext, ph := range exts {
 			atkFile := finalX9Base + ext
@@ -1878,7 +1847,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 						reflectedURLs := extractReflectedURLsFromCurl(res)
 						probedCount := countLines(atkFile)
 						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(reflectedURLs))
-						// Aggregate findings into report using our updated helper
 						aggregateCurlFindings(&report, reflectedURLs, ph, targetURL)
 					}
 				} else {
@@ -1951,8 +1919,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 	}
 
-	// GET/JSON/header findings are fully determined at this point — report
-	// and notify them immediately, without waiting for this URL's DOM check.
 	if report.HasVulns() {
 		tg.notify(report)
 	}
@@ -1961,14 +1927,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	return art
 }
 
-// ── processURLDom (DOM/headless pipeline) ──────────────────────────────────
-//
-// processURLDom handles everything that shells out to dom_sink_checker
-// (spins up headless Chrome): the DOM canary probe, the DOM query probe, and
-// the DOM fragment/query attacks. It is scheduled on its own low-concurrency
-// worker pool (sized by -w) completely independently of processURLFast's
-// pool (sized by -fast-workers), so a backlog of slow DOM checks never
-// blocks the fast pipeline from racing through the rest of the URL list.
 func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	report := VulnerabilityReport{URL: art.TargetURL}
 
@@ -1983,7 +1941,6 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	p3Findings := make(map[string][]string)
 	domProbeSkippedAll := false
 
-	// Phase 3 DOM: canary probe file (x9 -dom output)
 	domCanaryFile := art.ProbeOutputBase + ".dom.canary"
 	if !domScanEnabled {
 		logLine("SKIP-DOM-DISABLED", X_gray, "DOM/headless checks disabled (pass -dom-scan to enable) for %s", targetURL)
@@ -2016,9 +1973,7 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 		}
 	}
 
-	// Phase 3 DOM: query probe file
 	if !domScanEnabled {
-		// Silently skip, already logged disabled status above
 	} else {
 		if _, err := os.Stat(art.DomQueryProbeFile); err == nil {
 			if !hasJS && !forceAll {
@@ -2070,9 +2025,7 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 		return report
 	}
 
-	// Phase 4 DOM: fragment URLs
 	if !domScanEnabled {
-		// Skip block
 	} else {
 		var fragmentURLs []string
 		for _, line := range p3Findings["dom"] {
@@ -2121,9 +2074,7 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 		}
 	}
 
-	// Phase 4c: DOM Query Attack
 	if !domScanEnabled {
-		// Skip block
 	} else {
 		var domQueryURLs []string
 		for _, line := range p3Findings["dom"] {
@@ -2170,10 +2121,6 @@ func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	return report
 }
 
-// writeTriageFile reproduces the original combined -phase 3
-// triage_<target>.txt output (GET params + DOM canary + headers) once the
-// DOM pipeline's own Phase 3 work for this URL has finished. It's called
-// from processURLDom using the fast-stage data handed off via ProbeArtifacts.
 func writeTriageFile(art ProbeArtifacts, p3FindingsDom map[string][]string, domCount int) {
 	targetURL := art.TargetURL
 	getParamSet := art.GetParamSet
@@ -2272,8 +2219,6 @@ func writeTriageFile(art ProbeArtifacts, p3FindingsDom map[string][]string, domC
 	triageMu.Unlock()
 }
 
-// ── Helper: safe name for file naming ──────────────────────────────────────
-
 var safeNameRe = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
 func safeName(s string) string {
@@ -2325,6 +2270,7 @@ func countLines(filename string) int {
 	}
 	return count
 }
+
 func urlSignature(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -2338,6 +2284,7 @@ func urlSignature(rawURL string) string {
 	sort.Strings(paramNames)
 	return path + "?" + strings.Join(paramNames, ",")
 }
+
 func queryValueLength(rawURL string) int {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -2352,7 +2299,6 @@ func queryValueLength(rawURL string) int {
 	return totalLen
 }
 
-// NEW: Deduplicate URLs by signature, preserving the one with the longest query values
 func dedupBySignature(urls []string) []string {
 	type sigEntry struct {
 		bestURL string
@@ -2367,7 +2313,6 @@ func dedupBySignature(urls []string) []string {
 		valLen := queryValueLength(u)
 
 		if entry, exists := sigMap[sig]; exists {
-			// Prefer strictly longer value lengths (preserves first-occurrence on tie)
 			if valLen > entry.bestLen {
 				entry.bestURL = u
 				entry.bestLen = valLen
@@ -2382,7 +2327,6 @@ func dedupBySignature(urls []string) []string {
 		}
 	}
 
-	// Reconstruct list in original signature appearance order
 	orderedSigs := make([]*sigEntry, 0, len(sigMap))
 	for _, entry := range sigMap {
 		orderedSigs = append(orderedSigs, entry)
@@ -2398,15 +2342,10 @@ func dedupBySignature(urls []string) []string {
 	return result
 }
 
-// ── main ────────────────────────────────────────────────────────────────────
-
 func main() {
 	urlFile := flag.String("l", "", "URL list file")
 	singleURL := flag.String("u", "", "Single target URL")
 	flag.StringVar(&outputDir, "o", "./output", "Output directory")
-	flag.StringVar(&nucleiTemplate, "t", "xss_template_v2.yaml", "Reflection template")
-	flag.StringVar(&domTemplate, "dom", "dom_xss.yaml", "DOM template")
-	flag.StringVar(&canaryTemplate, "canary", "canary_matcher.yaml", "Canary template")
 	flag.StringVar(&paramFile, "p", "", "Parameter file")
 	flag.StringVar(&techFlag, "tech", "", "Comma-separated list of technologies")
 	flag.BoolVar(&forceAll, "force-all", false, "Disable tech-aware skipping logic")
@@ -2422,7 +2361,7 @@ func main() {
 	rateLimitFlag := flag.Float64("rate", 1.0, "Requests per second per host")
 	hcIntervalFlag := flag.Duration("hc-interval", 5*time.Minute, "Proxy health-check interval")
 	hcTimeoutFlag := flag.Duration("hc-timeout", 5*time.Second, "Proxy health-check timeout")
-	runCmdTimeoutFlag := flag.Duration("cmd-timeout", 5*time.Minute, "Hard timeout for external subprocess calls (dom_sink_checker, x9, curl_reflect_checker)") // <-- ADD THIS
+	runCmdTimeoutFlag := flag.Duration("cmd-timeout", 5*time.Minute, "Hard timeout for external subprocess calls (dom_sink_checker, x9, curl_reflect_checker)")
 	flag.Parse()
 	runCommandTimeout = *runCmdTimeoutFlag
 	ratelimit.Init(ratelimit.Config{
@@ -2431,18 +2370,12 @@ func main() {
 		HealthCheckTimeout:  *hcTimeoutFlag,
 	})
 
-	// ۲. لود کردن پروکسی‌ها (در صورتی که فایل وجود داشته باشد)
 	_ = ratelimit.LoadProxies("proxies.txt")
 	var err error
 	repLogger, err = reporter.NewLogger("results/raw_findings.jsonl")
 	if err != nil {
 		logLine("ERROR", X_red, "reporter init failed: %v", err)
 		os.Exit(1)
-	}
-	if _, err := exec.LookPath("nuclei"); err == nil {
-		nucleiExists = true
-	} else {
-		logLine("WARN", X_yellow, "Nuclei not found in PATH. Skipping nuclei phases.")
 	}
 
 	if _, err := exec.LookPath("./dom_sink_checker"); err == nil {
@@ -2451,7 +2384,6 @@ func main() {
 		logLine("WARN", X_yellow, "dom_sink_checker not found or not executable — DOM phases will be skipped")
 	}
 
-	// NEW: detect curl_reflect_checker
 	if _, err := exec.LookPath("./curl_reflect_checker"); err == nil {
 		curlCheckerExists = true
 	} else {
@@ -2532,17 +2464,13 @@ func main() {
 	var finalURLs []string
 	for rootDomain, groupUrls := range groups {
 		origCount := len(groupUrls)
-
-		// 1. Deduplicate by signature (preferring longest param values)
 		deduped := dedupBySignature(groupUrls)
 		dedupCount := len(deduped)
 
-		// Log the dedup stats per root domain group
 		logLine("DEDUP", X_cyan, "%s: %d URLs -> %d unique signatures (dropped %d)", rootDomain, origCount, dedupCount, origCount-dedupCount)
 
 		groupUrls = deduped
 
-		// 2. Stable sort to prioritize URLs with query parameters without penalizing long paths
 		sort.SliceStable(groupUrls, func(i, j int) bool {
 			pi, _ := url.Parse(groupUrls[i])
 			pj, _ := url.Parse(groupUrls[j])
@@ -2551,7 +2479,6 @@ func main() {
 			return hasQi && !hasQj
 		})
 
-		// 3. Keep existing truncation logic, which now operates on the deduped, properly sorted list
 		if maxURLsPerTarget > 0 && len(groupUrls) > maxURLsPerTarget {
 			groupUrls = groupUrls[:maxURLsPerTarget]
 		}
@@ -2561,14 +2488,6 @@ func main() {
 
 	allCrawledURLs = append(allCrawledURLs, urls...)
 
-	// Two independently-scheduled pipelines against the same URL list:
-	//   - fast pool (-fast-workers): probe gen + GET/JSON/header reflection
-	//   - dom pool (-w): DOM/headless checks (dom_sink_checker, heavy on RAM/CPU)
-	// The fast pool never blocks on the dom pool: as soon as processURLFast
-	// returns artifacts for a URL, it's handed off via artifactsChan and the
-	// fast worker immediately moves on to the next URL. A dispatcher
-	// goroutine fans artifacts out to dom workers gated by their own
-	// concurrency limit.
 	fastSem := make(chan struct{}, fastWorkers)
 	domSem := make(chan struct{}, workers)
 	var fastWg sync.WaitGroup
@@ -2640,12 +2559,33 @@ func main() {
 
 	finalIn := filepath.Join(outputDir, "all_crawled_discovery.txt")
 	os.WriteFile(finalIn, []byte(strings.Join(uniqueStrings(allCrawledURLs), "\n")), 0644)
-	if so, _ := runCommand("nuclei", "-l", finalIn, "-t", nucleiTemplate, "-silent"); so != "" {
-		soReport := VulnerabilityReport{URL: "Global Second-Order Check"}
-		soReport.aggregateFindings(so, "get")
-		if soReport.HasVulns() {
-			tg.notify(soReport)
+
+	if !curlCheckerExists {
+		logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping Global Second-Order Check")
+	} else {
+		res, err := runCommand("./curl_reflect_checker", "-l", finalIn, "-xss")
+		if err != nil {
+			logLine("CURLCHECK-ERR", X_red, "Global Second-Order Check: curl_reflect_checker exited with error: %v", err)
+		} else if res == "" {
+			logLine("CURLCHECK-EMPTY", X_yellow, "Global Second-Order Check: curl_reflect_checker ran but returned no output")
+		}
+
+		if res != "" {
+			reflectedURLs := extractReflectedURLsFromCurl(res)
+			if len(reflectedURLs) > 0 {
+				soReport := VulnerabilityReport{URL: "Global Second-Order Check"}
+				aggregateCurlFindings(&soReport, reflectedURLs, "get", "Global Second-Order Check")
+				if soReport.HasVulns() {
+					tg.notify(soReport)
+				}
+			}
 		}
 	}
-	fmt.Printf("\n%s[DONE]%s Pipeline Complete.\n", X_green, X_reset)
+
+	wafCount := atomic.LoadInt64(&wafChallengeDetected)
+	if wafCount > 0 {
+		fmt.Printf("\n%s[DONE]%s Pipeline Complete. (WAF Challenges Detected: %d)\n", X_green, X_reset, wafCount)
+	} else {
+		fmt.Printf("\n%s[DONE]%s Pipeline Complete.\n", X_green, X_reset)
+	}
 }
