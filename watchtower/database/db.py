@@ -391,7 +391,14 @@ def bulk_upsert_subdomains(program_name, subdomains_list, provider):
 
 @retry_on_autoreconnect(max_retries=3)
 def upsert_live(obj):
-    """درج یا بروزرسانی ساب‌دامین زنده"""
+    """
+    درج یا بروزرسانی ساب‌دامین زنده
+
+    Note: We explicitly check and update `program_name` and `scope` on existing 
+    documents. Because documents are matched solely by `subdomain` (which is globally 
+    unique), their `program_name` and `scope` can silently drift if the domain is later 
+    processed under a newly generated program name or a different scope.
+    """
     program = Programs.objects(scopes__in=[obj.get('scope')]).first()
 
     if not program:
@@ -401,6 +408,17 @@ def upsert_live(obj):
     existing = LiveSubdomains.objects(subdomain=obj.get('subdomain')).first()
 
     if existing:
+        needs_save = False
+
+        # Check for drift in program_name and scope
+        if existing.program_name != program.program_name:
+            existing.program_name = program.program_name
+            needs_save = True
+
+        if existing.scope != obj.get('scope'):
+            existing.scope = obj.get('scope')
+            needs_save = True
+
         ips_changed = False
         if obj.get('ips'):
             new_ips = sorted(obj.get('ips', []))
@@ -410,9 +428,12 @@ def upsert_live(obj):
                 ips_changed = True
 
         if ips_changed or obj.get('cdn') != existing.cdn:
-            existing.last_update = datetime.now()
             if obj.get('cdn'):
                 existing.cdn = obj.get('cdn')
+            needs_save = True
+
+        if needs_save:
+            existing.last_update = datetime.now()
             existing.save()
             print(f"[{current_time()}] Updated live subdomain: {obj.get('subdomain')}")
     else:
@@ -433,7 +454,14 @@ def upsert_live(obj):
 
 @retry_on_autoreconnect(max_retries=3)
 def upsert_http(obj):
-    """درج یا بروزرسانی اطلاعات HTTP"""
+    """
+    درج یا بروزرسانی اطلاعات HTTP
+
+    Note: We explicitly check and update `program_name` and `scope` on existing 
+    documents. Because documents are matched solely by `subdomain` (which is globally 
+    unique), their `program_name` and `scope` can silently drift if the domain is later 
+    processed under a newly generated program name or a different scope.
+    """
     program = Programs.objects(scopes__in=[obj.get('scope')]).first()
 
     if not program:
@@ -444,6 +472,15 @@ def upsert_http(obj):
 
     if existing:
         changes = []
+
+        # Check for drift in program_name and scope
+        if existing.program_name != program.program_name:
+            changes.append(f"program_name: {existing.program_name} -> {program.program_name}")
+            existing.program_name = program.program_name
+        
+        if existing.scope != obj.get('scope'):
+            changes.append(f"scope: {existing.scope} -> {obj.get('scope')}")
+            existing.scope = obj.get('scope')
 
         if obj.get('title') and existing.title != obj.get('title'):
             changes.append(f"title: {existing.title} -> {obj.get('title')}")
@@ -501,7 +538,7 @@ def upsert_http(obj):
         )
 
     return True
-
+    
 
 @retry_on_autoreconnect(max_retries=3)
 def upsert_scan_artifacts(subdomain, passive_urls=None, crawled_urls=None, discovered_params=None):
