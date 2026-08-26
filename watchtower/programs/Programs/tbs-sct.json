@@ -1,0 +1,32 @@
+{
+  "program_name": "tbs-sct",
+  "scopes": [
+    "*.numerique.canada.ca",
+    "*.notification.canada.ca",
+    "*.cds-snc.ca",
+    "design-system.alpha.canada.ca",
+    "articles.alpha.canada.ca",
+    "forms-formulaires.alpha.canada.ca",
+    "auth.signin-connexion.canada.ca",
+    "app.signin-connexion.canada.ca",
+    "api.signin-connexion.canada.ca",
+    "issue-verify.alpha.canada.ca",
+    "delivrance-verification.alpha.canada.ca",
+    "gciv-dvgc.alpha.canada.ca",
+    "*.digital.canada.ca",
+    "talent.canada.ca",
+    "design-system.canada.ca"
+  ],
+  "outofscope": [
+    "*.cdssandbox.xyz",
+    "All other assets",
+    "blawx.cdssandbox.xyz",
+    "strapi.cdssandbox.xyz",
+    "ai-answers.alpha.canada.ca",
+    "reponses-ia.alpha.canada.ca",
+    "ai-answers.cdssandbox.xyz",
+    "reponses-ia.cdssandbox.xyz",
+    "feedback-viewer.cdssandbox.xyz",
+    "feedback-collection.cdssandbox.xyz"
+  ]
+}

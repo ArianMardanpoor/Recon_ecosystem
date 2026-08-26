@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reconpipeline/pkg/corscheck"
 	"reconpipeline/pkg/ratelimit"
 	"reconpipeline/pkg/reflectctx"
 	"reconpipeline/pkg/reporter"
@@ -1571,6 +1572,33 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	if targetAlive {
 		hasJS = hasClientSideJSRisk(targetURL)
 		atomic.StoreInt64(&consecutiveDead, 0)
+
+		// --- BEGIN CORS INTEGRATION ---
+		corsFindings := corscheck.CheckCORS(targetURL)
+		for _, finding := range corsFindings {
+			if repLogger != nil {
+				repLogger.Log(reporter.NewFinding(
+					extractRootDomain(uParsed.Hostname()),
+					targetURL,
+					finding.Origin,
+					"corscheck",
+					finding.Confidence,
+					"cors_misconfig",
+					reporter.Context{
+						Location:     finding.Variant,
+						AllowedChars: []string{finding.ReflectedACAO},
+					},
+				))
+			}
+
+			// Only output HIGH confidence findings to stdout to avoid terminal noise
+			if finding.Confidence == "HIGH" {
+				logLine("CORS", X_yellow, "%s: CORS misconfig (%s, origin=%s, creds=%v)",
+					targetURL, finding.Confidence, finding.Origin, finding.AllowCredentials)
+			}
+		}
+		// --- END CORS INTEGRATION ---
+
 	} else {
 		newCount := atomic.AddInt64(&consecutiveDead, 1)
 		if newCount%5 == 0 {
