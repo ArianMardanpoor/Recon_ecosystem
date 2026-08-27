@@ -43,12 +43,28 @@ func CheckCORS(targetURL string) []Finding {
 		return findings
 	}
 
+	const attacker = "evil-corstest.com"
+
 	variants := map[string]string{
-		"exact_reflect":    "https://evil-corstest.com",
+		"exact_reflect":    "https://" + attacker,
 		"null_origin":      "null",
-		"subdomain_bypass": "https://" + hostname + ".evil-corstest.com",
-		"prefix_bypass":    "https://evil-corstest" + hostname,
-		"suffix_bypass":    "https://evil-corstest.com." + hostname,
+		"subdomain_bypass": "https://" + hostname + "." + attacker,
+		"prefix_bypass":    "https://" + attacker + hostname,
+		"suffix_bypass":    "https://" + attacker + "." + hostname,
+
+		// --- NEW: userinfo / double-scheme / backslash-normalization bypasses ---
+		// Some parsers (Node's legacy url.parse, some Java/older browser URL
+		// implementations) treat the segment BEFORE '@' as userinfo and only
+		// look at what's AFTER '@' as the host, or mis-handle a second
+		// "scheme:" / backslash as a path/host separator equivalent to '/'.
+		"userinfo_bypass":             "https://" + hostname + "@" + attacker,
+		"double_scheme_www":           "https:https://www." + hostname,
+		"double_scheme_path_bypass":   "https:https://" + attacker + "/" + hostname,
+		"double_scheme_query_bypass":  "https:https://" + attacker + "?" + hostname,
+		"double_scheme_dot_backslash": "https:https://" + attacker + `\.` + hostname,
+		"double_scheme_at_backslash":  "https:https://" + attacker + `\@www.` + hostname,
+		"backslash_dot_bypass":        "https://" + attacker + `\.` + hostname,
+		"backslash_at_bypass":         "https://" + attacker + `\@www.` + hostname,
 	}
 
 	for variant, originValue := range variants {
