@@ -121,22 +121,28 @@ func sendTelegramDoc(token, chatID, filePath, caption string) error {
 	return nil
 }
 
+type PriorityTarget struct {
+	URL      string
+	Priority int
+}
+
 type APIResponse struct {
 	Data []struct {
-		URL      string `json:"url"`
-		FinalURL string `json:"final_url"`
+		URL          string `json:"url"`
+		FinalURL     string `json:"final_url"`
+		ScanPriority int    `json:"scan_priority"`
 	} `json:"data"`
 	Pages int `json:"pages"`
 }
 
-func fetchDataFromAPI(isFresh bool, program string) []string {
+func fetchDataFromAPI(isFresh bool, program string) []PriorityTarget {
 	logMsg("Connecting to API...", M_cyan)
-	var allURLs []string
+	var allTargets []PriorityTarget
 	currentPage := 1
 	perPage := 500
 
 	for {
-		urlStr := fmt.Sprintf("%s?page=%d&per_page=%d", apiURL, currentPage, perPage)
+		urlStr := fmt.Sprintf("%s?page=%d&per_page=%d&sort=scan_priority", apiURL, currentPage, perPage)
 
 		// اعمال فیلتر فرش
 		if isFresh {
@@ -176,7 +182,10 @@ func fetchDataFromAPI(isFresh bool, program string) []string {
 				target = item.URL
 			}
 			if target != "" {
-				allURLs = append(allURLs, target)
+				allTargets = append(allTargets, PriorityTarget{
+					URL:      target,
+					Priority: item.ScanPriority,
+				})
 			}
 		}
 
@@ -186,11 +195,11 @@ func fetchDataFromAPI(isFresh bool, program string) []string {
 		currentPage++
 	}
 
-	logMsg(fmt.Sprintf("Total unique URLs retrieved from API: %d", len(allURLs)), M_cyan)
-	return allURLs
+	logMsg(fmt.Sprintf("Total unique URLs retrieved from API: %d", len(allTargets)), M_cyan)
+	return allTargets
 }
 
-func getNewTargetsOnly(targets []string) []string {
+func getNewTargetsOnly(targets []PriorityTarget) []PriorityTarget {
 	logMsg("Checking for new targets (Diffing)...", M_cyan)
 	scanned := make(map[string]bool)
 	file, err := os.Open(oldTargetsFile)
@@ -202,9 +211,9 @@ func getNewTargetsOnly(targets []string) []string {
 		file.Close()
 	}
 
-	var newTargets []string
+	var newTargets []PriorityTarget
 	for _, t := range targets {
-		if !scanned[t] {
+		if !scanned[t.URL] {
 			newTargets = append(newTargets, t)
 		}
 	}
@@ -262,7 +271,6 @@ func countLinesInDir(dir string) int {
 }
 
 // runIngest runs the python database ingestion script per target
-// FIX BUG1: Modified runIngest to return bool to signal success/failure to the caller.
 func runIngest(hostname string) bool {
 	// 1. تنظیم مسیر پایتون با بررسی وجود فایل (os.Stat)
 	pythonPath := os.Getenv("WATCHTOWER_PYTHON")
@@ -327,7 +335,6 @@ func runIngest(hostname string) bool {
 	}
 }
 
-// FIX BUG2: Added struct and function for JSONL cleanup audit log and output deletion
 type CleanupAuditEntry struct {
 	Timestamp   string   `json:"timestamp"`
 	Target      string   `json:"target"`
@@ -395,8 +402,14 @@ func cleanupTargetOutput(target, dirPath string) {
 
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
-func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool) {
+func processTarget(target string, priority int, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool) {
 	logMsg(fmt.Sprintf("--- Starting: %s ---", target), M_purple+M_bold)
+
+	effectivePhase := phase
+	if priority >= 2 && effectivePhase > 3 {
+		effectivePhase = 3
+		logMsg(fmt.Sprintf("Tier 3 target — capping scan depth at phase 3 for %s", target), M_gray)
+	}
 
 	u, err := url.Parse(target)
 	if err != nil {
@@ -414,7 +427,6 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	katanaDir := filepath.Join(globalOutputDir, "katana")
 	paramsDir := filepath.Join(globalOutputDir, "params")
 
-	// FIX BUG3: Create per-target xssniper isolation directory
 	xssniperOutDir := filepath.Join(globalOutputDir, "xssniper_out", safeURL)
 	os.MkdirAll(xssniperOutDir, 0755)
 
@@ -501,7 +513,6 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 		}
 	}
 
-	// FIX BUG4: Append isolated output directory parameter dynamically
 	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3", "-o", xssniperOutDir}
 	if isSingleTarget {
 		args = append(args, "-u", target)
@@ -509,7 +520,7 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	if skipSPA {
 		args = append(args, "-skip-spa")
 	}
-	args = append(args, "-phase", fmt.Sprintf("%d", phase))
+	args = append(args, "-phase", fmt.Sprintf("%d", effectivePhase))
 	if domScan {
 		args = append(args, "-dom-scan")
 	}
@@ -518,7 +529,6 @@ func processTarget(target string, isSingleTarget bool, skipSPA bool, noCrawl boo
 	runBinary("./xssniper", args...)
 
 	// پایپ‌لاین اینجکشن دیتابیس بلافاصله پس از اتمام کار xssniper
-	// FIX BUG5: Capture status and conditionally clean up the output dir
 	ingestOK := runIngest(hostname)
 
 	if ingestOK {
@@ -568,15 +578,15 @@ func main() {
 		os.Exit(1)
 	}
 	startTime := time.Now()
-	var newTargets []string
+	var newTargets []PriorityTarget
 	isSingleTarget := false
 
 	if *targetURL != "" {
-		newTargets = []string{*targetURL}
+		newTargets = []PriorityTarget{{URL: *targetURL, Priority: 0}}
 		logMsg(fmt.Sprintf("Single target mode: %s", *targetURL), M_cyan)
 		isSingleTarget = true
 	} else {
-		var rawTargets []string
+		var rawTargets []PriorityTarget
 		if *inputFile != "" {
 			file, err := os.Open(*inputFile)
 			if err != nil {
@@ -586,7 +596,7 @@ func main() {
 			scanner := bufio.NewScanner(file)
 			for scanner.Scan() {
 				if t := strings.TrimSpace(scanner.Text()); t != "" {
-					rawTargets = append(rawTargets, t)
+					rawTargets = append(rawTargets, PriorityTarget{URL: t, Priority: 0})
 				}
 			}
 			file.Close()
@@ -616,7 +626,7 @@ func main() {
 
 	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
-		processTarget(target, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana)
+		processTarget(target.URL, target.Priority, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana)
 	}
 
 	mdPath := "results/TARGET_REPORT.md"

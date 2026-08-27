@@ -168,6 +168,20 @@ def is_in_scope(subdomain, scopes, outofscopes, regex_filters=None):
 # Database Models
 # ==========================================
 
+def compute_scan_priority(status_code: int) -> int:
+    """
+    Computes scan order priority based on HTTP status code.
+    0 = Tier 1 (status_code 200-299 or 300-399)
+    1 = Tier 2 (status_code == 404)
+    2 = Tier 3 (status_code == 401, 403, or 500-599 or default)
+    """
+    if 200 <= status_code <= 399:
+        return 0
+    elif status_code == 404:
+        return 1
+    else:
+        return 2
+
 class Programs(Document):
     program_name = StringField(required=True, unique=True)
     created_date = DateTimeField(default=datetime.now)
@@ -229,6 +243,7 @@ class Http(Document):
     tech = ListField(StringField(), default=[])
     title = StringField(default="")
     status_code = IntField(default=0)
+    scan_priority = IntField(default=2)
     headers = DictField(default={})
     url = StringField()
     final_url = StringField()
@@ -393,11 +408,6 @@ def bulk_upsert_subdomains(program_name, subdomains_list, provider):
 def upsert_live(obj):
     """
     درج یا بروزرسانی ساب‌دامین زنده
-
-    Note: We explicitly check and update `program_name` and `scope` on existing 
-    documents. Because documents are matched solely by `subdomain` (which is globally 
-    unique), their `program_name` and `scope` can silently drift if the domain is later 
-    processed under a newly generated program name or a different scope.
     """
     program = Programs.objects(scopes__in=[obj.get('scope')]).first()
 
@@ -456,11 +466,6 @@ def upsert_live(obj):
 def upsert_http(obj):
     """
     درج یا بروزرسانی اطلاعات HTTP
-
-    Note: We explicitly check and update `program_name` and `scope` on existing 
-    documents. Because documents are matched solely by `subdomain` (which is globally 
-    unique), their `program_name` and `scope` can silently drift if the domain is later 
-    processed under a newly generated program name or a different scope.
     """
     program = Programs.objects(scopes__in=[obj.get('scope')]).first()
 
@@ -494,6 +499,8 @@ def upsert_http(obj):
             changes.append("favicon changed")
             existing.favicon = obj.get('favicon')
 
+        existing.scan_priority = compute_scan_priority(obj.get('status_code', 0))
+
         if changes:
             print(f"[{current_time()}] Changes detected for {obj.get('subdomain')}: {', '.join(changes)}")
             queue_http_change(
@@ -518,6 +525,7 @@ def upsert_http(obj):
             tech=obj.get('tech', []),
             title=obj.get('title', ''),
             status_code=obj.get('status_code', 0),
+            scan_priority=compute_scan_priority(obj.get('status_code', 0)),
             headers=obj.get('headers', {}),
             url=obj.get('url', ''),
             final_url=obj.get('final_url', ''),

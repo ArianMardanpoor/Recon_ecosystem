@@ -116,6 +116,7 @@ def serialize_http(h, providers=None):
         'final_url': h.final_url,
         'title': h.title,
         'status_code': h.status_code,
+        'scan_priority': getattr(h, 'scan_priority', 2),
         'tech': h.tech,
         'ips': h.ips,
         'headers': h.headers,
@@ -470,6 +471,14 @@ def get_http():
     elif tested == 'false':
         q = q.filter(tested=False)
 
+    scan_priority = request.args.get('scan_priority', '').strip()
+    if scan_priority.isdigit():
+        q = q.filter(scan_priority=int(scan_priority))
+        
+    max_scan_priority = request.args.get('max_scan_priority', '').strip()
+    if max_scan_priority.isdigit():
+        q = q.filter(scan_priority__lte=int(max_scan_priority))
+
     scan_status = request.args.get('scan_status', '').strip()
     if scan_status:
         q = q.filter(scan_status=scan_status)
@@ -527,6 +536,7 @@ def get_http():
         'title': '+title', '-title': '-title',
         'scan_status': '+scan_status', '-scan_status': '-scan_status',
         'last_scan_date': '+last_scan_date', '-last_scan_date': '-last_scan_date',
+        'scan_priority': '+scan_priority', '-scan_priority': '-scan_priority',
     }
     order = sort_map.get(request.args.get('sort', '-created_date'), '-created_date')
     q = q.order_by(order)
@@ -930,7 +940,8 @@ def export_subdomains():
         http_subs = set(Http.objects().distinct('subdomain'))
         q = q.filter(subdomain__in=http_subs) if has_http == 'true' else q.filter(subdomain__nin=http_subs)
 
-    text = '\n'.join(sd.subdomain for sd in q)
+    text = '
+'.join(sd.subdomain for sd in q)
     return app.response_class(text, mimetype='text/plain')
 
 
@@ -949,7 +960,8 @@ def export_urls():
         q = q.filter(status_code=status_code)
 
     urls = [h.url or h.subdomain for h in q if h.url or h.subdomain]
-    return app.response_class('\n'.join(urls), mimetype='text/plain')
+    return app.response_class('
+'.join(urls), mimetype='text/plain')
 
 
 @app.route('/api/export/lives', methods=['GET'])
@@ -972,7 +984,8 @@ def export_lives():
     elif has_cdn == 'false':
         q = q.filter(Q(cdn='') | Q(cdn__exists=False))
 
-    text = '\n'.join(l.subdomain for l in q)
+    text = '
+'.join(l.subdomain for l in q)
     return app.response_class(text, mimetype='text/plain')
 
 
@@ -1002,7 +1015,8 @@ def export_lives_ips():
             if ip:
                 unique_ips.add(ip)
 
-    text = '\n'.join(sorted(list(unique_ips)))
+    text = '
+'.join(sorted(list(unique_ips)))
     return app.response_class(text, mimetype='text/plain')
 
 
