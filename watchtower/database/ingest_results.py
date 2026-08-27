@@ -41,6 +41,8 @@ CATEGORY_REFLECTION_MAP = {
     "headers": "header_injection",
     "json_body": "json_body_injection",
     "dom": "dom_sink_injection",
+    "open_redirect": "open_redirect",
+    "location_injection": "location_header_injection",
 }
 
 
@@ -191,7 +193,7 @@ def read_vulnerability_files(workdir: Path, hostname: str, global_mode: bool) ->
             mtime = datetime.fromtimestamp(filepath.stat().st_mtime)
             timestamp_str = mtime.isoformat()
             
-            for category in ['query_parameters', 'headers', 'json_body', 'dom']:
+            for category in ['query_parameters', 'headers', 'json_body', 'dom', 'open_redirect', 'location_injection']:
                 vulns = data.get(category, [])
                 reflection_type = CATEGORY_REFLECTION_MAP.get(category, 'unknown')
                 

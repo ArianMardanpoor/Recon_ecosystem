@@ -9,6 +9,7 @@
 // - FIX BUG4: Upgraded Phase 4 GET reflection aggregation in aggregateCurlFindings to confirmed severity.
 // - FIX BUG5: Added retry-on-timeout resilience to curlRequest HTTP helper.
 // - Added: HTTP Headers parsing via curl -i, CSP extraction, and Severity downgrade (confirmed -> likely) if strict CSP is present.
+// - Added: Location-header and open-redirect checking via new curl_reflect_checker "-check-location" mode.
 
 package main
 
@@ -268,11 +269,13 @@ type Vulnerability struct {
 }
 
 type VulnerabilityReport struct {
-	URL             string          `json:"url"`
-	QueryParameters []Vulnerability `json:"query_parameters,omitempty"`
-	Headers         []Vulnerability `json:"headers,omitempty"`
-	JSONBody        []Vulnerability `json:"json_body,omitempty"`
-	DOM             []Vulnerability `json:"dom,omitempty"`
+	URL               string          `json:"url"`
+	QueryParameters   []Vulnerability `json:"query_parameters,omitempty"`
+	Headers           []Vulnerability `json:"headers,omitempty"`
+	JSONBody          []Vulnerability `json:"json_body,omitempty"`
+	DOM               []Vulnerability `json:"dom,omitempty"`
+	OpenRedirect      []Vulnerability `json:"open_redirect,omitempty"`
+	LocationInjection []Vulnerability `json:"location_injection,omitempty"`
 }
 
 type DomSinkOutput struct {
@@ -318,10 +321,12 @@ func logReportFindings(report *VulnerabilityReport) {
 	logGroup(report.Headers, "xssniper", "header_injection")
 	logGroup(report.JSONBody, "xssniper", "json_body_injection")
 	logGroup(report.DOM, "xssniper", "dom_sink_injection")
+	logGroup(report.OpenRedirect, "xssniper", "open_redirect")
+	logGroup(report.LocationInjection, "xssniper", "location_header_injection")
 }
 
 func (r *VulnerabilityReport) HasVulns() bool {
-	return len(r.QueryParameters) > 0 || len(r.Headers) > 0 || len(r.JSONBody) > 0 || len(r.DOM) > 0
+	return len(r.QueryParameters) > 0 || len(r.Headers) > 0 || len(r.JSONBody) > 0 || len(r.DOM) > 0 || len(r.OpenRedirect) > 0 || len(r.LocationInjection) > 0
 }
 
 func redactX9(s string) string {
@@ -699,6 +704,8 @@ func dedupeNucleiFindings(report VulnerabilityReport) string {
 	renderSection("Query Params", report.QueryParameters)
 	renderSection("Headers", report.Headers)
 	renderSection("JSON Body", report.DOM)
+	renderSection("Open Redirect", report.OpenRedirect)
+	renderSection("Location Injection", report.LocationInjection)
 	return sb.String()
 }
 
@@ -783,7 +790,7 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 	totalVulns := 0
 	noisyDOMVulns := 0
 
-	checkList := [][]Vulnerability{report.QueryParameters, report.Headers, report.JSONBody, report.DOM}
+	checkList := [][]Vulnerability{report.QueryParameters, report.Headers, report.JSONBody, report.DOM, report.OpenRedirect, report.LocationInjection}
 	for _, list := range checkList {
 		for _, v := range list {
 			totalVulns++
@@ -834,6 +841,12 @@ func (tg *Telegram) notify(report VulnerabilityReport) {
 			}
 			if len(report.DOM) > 0 {
 				sb.WriteString(fmt.Sprintf("- DOM: %d\n", len(report.DOM)))
+			}
+			if len(report.OpenRedirect) > 0 {
+				sb.WriteString(fmt.Sprintf("- Open Redirect: %d\n", len(report.OpenRedirect)))
+			}
+			if len(report.LocationInjection) > 0 {
+				sb.WriteString(fmt.Sprintf("- Location Injection: %d\n", len(report.LocationInjection)))
 			}
 
 			tg.sendMessage(sb.String())
@@ -1442,6 +1455,142 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 	}
 }
 
+func extractLocationURLsFromCurl(output string) (openRedirects []string, headerInjections []string) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var domOut DomSinkOutput
+		if err := json.Unmarshal([]byte(line), &domOut); err != nil {
+			continue
+		}
+		for _, sink := range domOut.Sinks {
+			if sink == "location_open_redirect" && domOut.URL != "" {
+				openRedirects = append(openRedirects, domOut.URL)
+			} else if sink == "location_header_injection" && domOut.URL != "" {
+				headerInjections = append(headerInjections, domOut.URL)
+			}
+		}
+	}
+	return
+}
+
+func aggregateLocationFindings(report *VulnerabilityReport, openRedirects []string, headerInjections []string) {
+	processList := func(urls []string, targetSlice *[]Vulnerability, isRedirect bool) {
+		paramMap := make(map[string]*Vulnerability)
+		for _, u := range urls {
+			payload := reX9.FindString(u)
+			if payload == "" {
+				continue
+			}
+			parsed, err := url.Parse(u)
+			if err != nil {
+				continue
+			}
+			var paramName string
+			for k, v := range parsed.Query() {
+				for _, val := range v {
+					if strings.Contains(val, payload) {
+						paramName = k
+						break
+					}
+				}
+				if paramName != "" {
+					break
+				}
+			}
+			if paramName == "" {
+				continue
+			}
+
+			severity := "likely"
+			confirmed := false
+
+			if isRedirect {
+				randDomain := fmt.Sprintf("https://x9attacker-%s.test", randomString(6))
+				cleanURL := *parsed
+				q := cleanURL.Query()
+				q.Set(paramName, randDomain)
+				cleanURL.RawQuery = q.Encode()
+				verifyURL := cleanURL.String()
+
+				ratelimit.Acquire(verifyURL)
+				status, respHeaders, _, err := curlRequest(verifyURL, "GET", nil, "", 15)
+				if err == nil && status >= 300 && status < 400 {
+					if loc, ok := respHeaders["location"]; ok {
+						if strings.Contains(loc, randDomain) {
+							severity = "confirmed"
+							confirmed = true
+						}
+					}
+				}
+			}
+
+			if existing, ok := paramMap[paramName]; ok {
+				exists := false
+				for _, p := range existing.Payloads {
+					if p == payload {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					existing.Payloads = append(existing.Payloads, payload)
+				}
+				if severityWeight(severity) > severityWeight(existing.Severity) {
+					existing.Severity = severity
+					existing.Confirmed = confirmed
+				}
+			} else {
+				paramMap[paramName] = &Vulnerability{
+					Name:      paramName,
+					Severity:  severity,
+					Payloads:  []string{payload},
+					Confirmed: confirmed,
+				}
+			}
+		}
+
+		if len(paramMap) > 0 {
+			for _, vuln := range paramMap {
+				found := false
+				for i, existing := range *targetSlice {
+					if existing.Name == vuln.Name {
+						for _, p := range vuln.Payloads {
+							exists := false
+							for _, ep := range existing.Payloads {
+								if ep == p {
+									exists = true
+									break
+								}
+							}
+							if !exists {
+								(*targetSlice)[i].Payloads = append((*targetSlice)[i].Payloads, p)
+							}
+						}
+						if severityWeight(vuln.Severity) > severityWeight(existing.Severity) {
+							(*targetSlice)[i].Severity = vuln.Severity
+						}
+						if vuln.Confirmed {
+							(*targetSlice)[i].Confirmed = true
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					*targetSlice = append(*targetSlice, *vuln)
+				}
+			}
+		}
+	}
+
+	processList(openRedirects, &report.OpenRedirect, true)
+	processList(headerInjections, &report.LocationInjection, false)
+}
+
 type ProbeArtifacts struct {
 	TargetURL         string
 	Index             int
@@ -1681,6 +1830,21 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", pf, probedCount, len(reflectedURLs))
 						p3Findings[probePhase] = append(p3Findings[probePhase], reflectedURLs...)
 					}
+
+					if probePhase == "get" {
+						resLoc, errLoc := runCommand("./curl_reflect_checker", "-l", pf, "-check-location", "-xss")
+						if errLoc != nil {
+							logLine("CURLCHECK-ERR", X_red, "%s (%s): curl_reflect_checker (location) exited with error: %v", targetURL, pf, errLoc)
+						} else if resLoc == "" {
+							logLine("CURLCHECK-EMPTY", X_yellow, "%s (%s): curl_reflect_checker (location) ran but returned no output", targetURL, pf)
+						}
+
+						if resLoc != "" {
+							openRedirects, headerInjections := extractLocationURLsFromCurl(resLoc)
+							logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs location probed -> %d open-redirects, %d header-injections", pf, countLines(pf), len(openRedirects), len(headerInjections))
+							aggregateLocationFindings(&report, openRedirects, headerInjections)
+						}
+					}
 				} else {
 					logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping reflection check for %s", pf)
 				}
@@ -1876,6 +2040,17 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 						probedCount := countLines(atkFile)
 						logLine("CURLCHECK-RESULT", X_cyan, "%s: %d URLs probed -> %d reflections found", atkFile, probedCount, len(reflectedURLs))
 						aggregateCurlFindings(&report, reflectedURLs, ph, targetURL)
+					}
+
+					if ph == "get" {
+						resLoc, errLoc := runCommand("./curl_reflect_checker", "-l", atkFile, "-check-location", "-xss")
+						if errLoc != nil {
+							logLine("CURLCHECK-ERR", X_red, "%s (%s): curl_reflect_checker (location) exited with error: %v", targetURL, atkFile, errLoc)
+						}
+						if resLoc != "" {
+							openRedirects, headerInjections := extractLocationURLsFromCurl(resLoc)
+							aggregateLocationFindings(&report, openRedirects, headerInjections)
+						}
 					}
 				} else {
 					logLine("WARN", X_yellow, "curl_reflect_checker not available, skipping Phase 4 reflection check for %s", atkFile)

@@ -115,6 +115,7 @@ func main() {
 	xssMode := flag.Bool("xss", false, "search for break-char pattern instead of plain canary")
 	timeout := flag.Int("timeout", 20, "per-request curl timeout in seconds (retried once at 2x on failure)")
 	concurrency := flag.Int("c", 5, "number of concurrent curl processes")
+	checkLocation := flag.Bool("check-location", false, "check Location header for open-redirect / header injection instead of body reflection (does not follow redirects)")
 	flag.Parse()
 
 	if *listFile == "" {
@@ -157,7 +158,11 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for u := range urls {
-				checkURL(u, opts)
+				if *checkLocation {
+					checkLocationHeader(u, opts)
+				} else {
+					checkURL(u, opts)
+				}
 			}
 		}()
 	}
@@ -180,19 +185,23 @@ func main() {
 	}
 }
 
-// curlAttempt issues a single curl request with the given per-attempt
-// timeout and returns the HTTP status code and response body.
-func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err error) {
-	args := []string{
-		"-s",
-		"-L",
+// runCurl is the low-level process-exec helper shared by curlAttempt and
+// checkLocationHeader. It builds the common curl invocation (UA, accept
+// headers, HTTPSTATUS trailer trick, timeout/context handling) and lets
+// callers customize the follow-redirect behavior and extra flags.
+func runCurl(rawURL string, timeoutSec int, followRedirects bool, extraArgs ...string) (stdout []byte, err error) {
+	args := []string{"-s"}
+	if followRedirects {
+		args = append(args, "-L")
+	}
+	args = append(args,
 		"--max-time", strconv.Itoa(timeoutSec),
 		"-A", userAgent,
 		"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
 		"-H", "Accept-Language: en-US,en;q=0.9",
-		"-w", "\nHTTPSTATUS:%{http_code}",
-		rawURL,
-	}
+	)
+	args = append(args, extraArgs...)
+	args = append(args, "-w", "\nHTTPSTATUS:%{http_code}", rawURL)
 
 	// Give curl a grace period beyond its own --max-time before
 	// killing the process at the Go level (defensive).
@@ -205,6 +214,20 @@ func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err er
 	cmd.Stderr = &stderrBuf
 
 	stdout, cmdErr := cmd.Output()
+	if cmdErr != nil {
+		return nil, cmdErr
+	}
+	return stdout, nil
+}
+
+// curlAttempt issues a single curl request with the given per-attempt
+// timeout and returns the HTTP status code and response body.
+//
+// NOTE: signature and behavior unchanged — internally now delegates to the
+// shared runCurl() helper so checkLocationHeader can reuse the same
+// flag-building / process-exec logic without duplicating it.
+func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err error) {
+	stdout, cmdErr := runCurl(rawURL, timeoutSec, true)
 	if cmdErr != nil {
 		return 0, nil, cmdErr
 	}
@@ -223,6 +246,185 @@ func curlAttempt(rawURL string, timeoutSec int) (status int, body []byte, err er
 	}
 
 	return statusCode, respBody, nil
+}
+
+// curlAttemptNoRedirect issues a single curl request WITHOUT following
+// redirects and with response headers captured (-D -), so the immediate
+// 3xx response's Location header can be inspected. Returns the status
+// code and the raw header block (everything up to, and including, the
+// blank line that terminates the HTTP headers).
+func curlAttemptNoRedirect(rawURL string, timeoutSec int) (status int, headerBlock string, err error) {
+	stdout, cmdErr := runCurl(rawURL, timeoutSec, false, "-D", "-")
+	if cmdErr != nil {
+		return 0, "", cmdErr
+	}
+
+	marker := []byte("\nHTTPSTATUS:")
+	idx := bytes.LastIndex(stdout, marker)
+	if idx < 0 {
+		return 0, "", fmt.Errorf("no HTTPSTATUS marker in output")
+	}
+
+	raw := stdout[:idx]
+	statusStr := strings.TrimSpace(string(stdout[idx+len(marker):]))
+	statusCode, convErr := strconv.Atoi(statusStr)
+	if convErr != nil {
+		return 0, string(raw), fmt.Errorf("unparseable HTTP status %q", statusStr)
+	}
+
+	// With -D -, headers are written to stdout ahead of the body (no
+	// redirects are followed, so there is exactly one header block).
+	// Split on the blank line ending the header section.
+	headerEnd := bytes.Index(raw, []byte("\r\n\r\n"))
+	sep := 4
+	if headerEnd == -1 {
+		headerEnd = bytes.Index(raw, []byte("\n\n"))
+		sep = 2
+	}
+	if headerEnd == -1 {
+		// No body / no blank line found (e.g. HEAD-like or truncated
+		// response) — treat the entire output as the header block.
+		return statusCode, string(raw), nil
+	}
+	return statusCode, string(raw[:headerEnd+sep]), nil
+}
+
+// extractLocationHeader scans a raw HTTP header block and returns the value
+// of the (last) "Location:" header found, case-insensitively.
+func extractLocationHeader(headerBlock string) (string, bool) {
+	lines := strings.Split(headerBlock, "\n")
+	value := ""
+	found := false
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if sepIdx := strings.Index(line, ":"); sepIdx > 0 {
+			key := strings.ToLower(strings.TrimSpace(line[:sepIdx]))
+			if key == "location" {
+				value = strings.TrimSpace(line[sepIdx+1:])
+				found = true
+			}
+		}
+	}
+	return value, found
+}
+
+// hasCRLFInjection reports whether s contains a literal or percent-encoded
+// (case-insensitive) CR or LF sequence, which would indicate header/response
+// splitting via an injected Location value.
+func hasCRLFInjection(s string) bool {
+	if strings.ContainsAny(s, "\r\n") {
+		return true
+	}
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "%0d") || strings.Contains(lower, "%0a")
+}
+
+// bareCanaryOrPayload extracts the bare x9 canary from payload when
+// possible, falling back to the full payload string. Used so the CRLF
+// fallback check in checkLocationHeader only fires when our own injected
+// marker is actually present in the header value (not on every 3xx).
+func bareCanaryOrPayload(payload string) string {
+	bare := reflectctx.ExtractCanary(payload)
+	if bare != "" {
+		return bare
+	}
+	return payload
+}
+
+// checkLocationHeader probes rawURL for open-redirect and Location-header
+// injection issues. It never follows redirects itself so it can inspect the
+// immediate 3xx response's Location header before curl's own redirect
+// following would otherwise consume it. This is a separate detection mode
+// from checkURL's body-reflection check and does not alter checkURL at all.
+func checkLocationHeader(rawURL string, opts checkOpts) {
+	payload := getDecodedPayload(rawURL)
+	if payload == "" {
+		return
+	}
+
+	status, headerBlock, err := curlAttemptNoRedirect(rawURL, opts.timeout)
+	if err != nil || status == 0 {
+		retryTimeout := opts.timeout * 2
+		status, headerBlock, err = curlAttemptNoRedirect(rawURL, retryTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s after retry (timeout=%ds then %ds): %v\n",
+				rawURL, opts.timeout, retryTimeout, err)
+			return
+		}
+	}
+	if status == 0 {
+		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000) even after retry\n", rawURL)
+		return
+	}
+
+	if status < 300 || status > 399 {
+		return
+	}
+
+	location, ok := extractLocationHeader(headerBlock)
+	if !ok || location == "" {
+		return
+	}
+
+	var sinkStr string
+	matched := false
+
+	// (a) Plain reflection / open-redirect: the Location value contains
+	// the injected payload, and — once trimmed / URL-decoded / stripped
+	// of a bare scheme prefix — is wholly dominated by it, indicating the
+	// app redirects wholesale to attacker-controlled input rather than
+	// merely echoing the value somewhere incidental.
+	trimmedLoc := strings.TrimSpace(location)
+	if strings.Contains(trimmedLoc, payload) {
+		decodedLoc, decErr := url.QueryUnescape(trimmedLoc)
+		if decErr != nil {
+			decodedLoc = trimmedLoc
+		}
+		strippedLoc := strings.TrimPrefix(strings.TrimPrefix(decodedLoc, "https://"), "http://")
+
+		if decodedLoc == payload || trimmedLoc == payload || strippedLoc == payload {
+			sinkStr = "location_open_redirect"
+			matched = true
+		}
+	}
+
+	// (b) Breakout / header-injection reflection — only in xss mode.
+	if !matched && opts.xssMode {
+		marker, hasMarker := extractMarkerChar(payload)
+		if hasMarker {
+			bareCanary := reflectctx.ExtractCanary(payload)
+			// ClassifyContext assumes an HTML/JS document context and
+			// will typically return ContextUnknown for a raw header
+			// value; VerifyBreakout will then simply report no match,
+			// which is the correct, safe outcome for this call.
+			isConfirmed, ctxType := reflectctx.VerifyBreakout([]byte(location), bareCanary, marker)
+			if isConfirmed && ctxType != reflectctx.ContextUnknown {
+				sinkStr = "location_header_injection"
+				matched = true
+			}
+		}
+
+		// Fallback: when structural context classification can't
+		// confirm a breakout (expected for raw headers), directly check
+		// for CRLF / header-splitting sequences in the Location value,
+		// but only when our own canary is actually present so we don't
+		// flag unrelated 3xx responses.
+		if !matched && strings.Contains(location, bareCanaryOrPayload(payload)) && hasCRLFInjection(location) {
+			sinkStr = "location_header_injection"
+			matched = true
+		}
+	}
+
+	if matched {
+		result := DomSinkOutput{
+			URL:        rawURL,
+			Sinks:      []string{sinkStr},
+			StatusCode: status,
+		}
+		opts.outMu.Lock()
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+		opts.outMu.Unlock()
+	}
 }
 
 func checkURL(rawURL string, opts checkOpts) {
