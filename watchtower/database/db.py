@@ -599,10 +599,7 @@ def upsert_scan_findings(subdomain, findings_list, scan_status, force=False):
         if any(str(f.get('confidence')).upper() == 'HIGH' for f in http_doc.findings):
             calculated_status = "confirmed_vuln"
 
-    if not force and http_doc.scan_status == "confirmed_vuln" and calculated_status != "confirmed_vuln":
-        new_status = "confirmed_vuln"
-    else:
-        new_status = calculated_status
+    new_status = calculated_status
 
     http_doc.scan_status = new_status
     http_doc.last_scan_date = datetime.now()
