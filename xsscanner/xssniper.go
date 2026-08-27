@@ -10,6 +10,7 @@
 // - FIX BUG5: Added retry-on-timeout resilience to curlRequest HTTP helper.
 // - Added: HTTP Headers parsing via curl -i, CSP extraction, and Severity downgrade (confirmed -> likely) if strict CSP is present.
 // - Added: Location-header and open-redirect checking via new curl_reflect_checker "-check-location" mode.
+// - ENHANCEMENT: Made WAF Challenge detection gate Phase 4 heavy payload tasks and log candidates safely.
 
 package main
 
@@ -975,12 +976,12 @@ func isConcreteURL(rawURL string) bool {
 	return true
 }
 
-func isTargetAlive(targetURL string) bool {
+func isTargetAlive(targetURL string) (alive bool, wafChallenge bool) {
 	ratelimit.Acquire(targetURL)
 
 	u, err := url.Parse(targetURL)
 	if err != nil {
-		return false
+		return false, false
 	}
 	u.Fragment = ""
 	checkURL := u.String()
@@ -1000,20 +1001,22 @@ func isTargetAlive(targetURL string) bool {
 
 		if statusCode == 0 {
 			if i == len(attempts)-1 {
-				return false
+				return false, false
 			}
 			continue
 		}
 
+		wafDetected := false
 		if detectWAFChallenge(statusCode, respBody) {
 			atomic.AddInt64(&wafChallengeDetected, 1)
 			logLine("WAF-CHALLENGE", X_yellow, "WAF Challenge page detected on %s", targetURL)
+			wafDetected = true
 		}
 
-		return true
+		return true, wafDetected
 	}
 
-	return false
+	return false, false
 }
 
 func checkConnectivity() bool {
@@ -1605,6 +1608,7 @@ type ProbeArtifacts struct {
 	GetReflectedRaw   []string
 	CandidateHeaders  []string
 	Skip              bool
+	WAFBlocked        bool // NEW FIELD
 }
 
 func processURLFast(targetURL string, index, total int) ProbeArtifacts {
@@ -1716,7 +1720,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	targetAlive := isTargetAlive(targetURL)
+	targetAlive, wafDetected := isTargetAlive(targetURL)
 	var hasJS bool
 	if targetAlive {
 		hasJS = hasClientSideJSRisk(targetURL)
@@ -1759,6 +1763,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	}
 	art.TargetAlive = targetAlive
 	art.HasJS = hasJS
+	art.WAFBlocked = wafDetected // Capture WAF state immediately
 
 	probeFiles := map[string]string{
 		probeOutputBase + ".get":    "get",
@@ -1897,15 +1902,25 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	targetAlive = isTargetAlive(targetURL)
-	if !targetAlive {
-		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4b, skipping confirm+attack", targetURL)
-		art.TargetAlive = false
-		if report.HasVulns() {
-			tg.notify(report)
+	// If WAF was detected at the start, log it and gate the heavy phases.
+	if art.WAFBlocked {
+		logLine("WAF-BLOCKED", X_yellow, "%s: WAF challenge detected — recording %d candidate params/headers but skipping confirm+attack (manual review recommended)", targetURL, len(getParamSet)+len(candidateHeaders))
+	} else {
+		// Mid-scan re-check #1 (Before Phase 4b)
+		targetAlive, wafDetected = isTargetAlive(targetURL)
+		if !targetAlive || wafDetected {
+			if !targetAlive {
+				logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4b, skipping confirm+attack", targetURL)
+			} else {
+				logLine("WAF-CHALLENGE-MIDSCAN", X_yellow, "%s: WAF challenge re-confirmed before heavy phase, skipping remaining attack steps", targetURL)
+			}
+			art.TargetAlive = targetAlive
+			if report.HasVulns() {
+				tg.notify(report)
+			}
+			logReportFindings(&report)
+			return art
 		}
-		logReportFindings(&report)
-		return art
 	}
 
 	confirmedParams := make(map[string]map[string]bool)
@@ -1913,6 +1928,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		confirmedParams[p] = make(map[string]bool)
 	}
 
+	// ALWAYS aggregate findings first (so they are reported as candidates if WAF skips confirm/attack)
 	for probePhase, urls := range p3Findings {
 		dummy := ""
 		for _, u := range urls {
@@ -1920,38 +1936,51 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 		report.aggregateFindings(dummy, probePhase)
 
-		var vList *[]Vulnerability
-		switch probePhase {
-		case "get":
-			vList = &report.QueryParameters
-		case "json":
-			vList = &report.JSONBody
-		}
+		// Only run confirmParameter heavy-requests if NOT WAF blocked
+		if !art.WAFBlocked {
+			var vList *[]Vulnerability
+			switch probePhase {
+			case "get":
+				vList = &report.QueryParameters
+			case "json":
+				vList = &report.JSONBody
+			}
 
-		if vList != nil {
-			for i := range *vList {
-				name := (*vList)[i].Name
-				if ok, p, hasCSP, allowsInline := confirmParameter(targetURL, probePhase, name); ok {
-					(*vList)[i].Confirmed = true
+			if vList != nil {
+				for i := range *vList {
+					name := (*vList)[i].Name
+					if ok, p, hasCSP, allowsInline := confirmParameter(targetURL, probePhase, name); ok {
+						(*vList)[i].Confirmed = true
 
-					if hasCSP && !allowsInline {
-						(*vList)[i].Severity = "likely"
-						note := " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
-						if !strings.Contains((*vList)[i].Name, note) {
-							(*vList)[i].Name += note
+						if hasCSP && !allowsInline {
+							(*vList)[i].Severity = "likely"
+							note := " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+							if !strings.Contains((*vList)[i].Name, note) {
+								(*vList)[i].Name += note
+							}
+						} else {
+							(*vList)[i].Severity = "confirmed"
 						}
-					} else {
-						(*vList)[i].Severity = "confirmed"
-					}
 
-					(*vList)[i].Payloads = p
-					confirmedParams[probePhase][name] = true
+						(*vList)[i].Payloads = p
+						confirmedParams[probePhase][name] = true
+					}
 				}
 			}
 		}
 	}
 
+	// For candidate headers, ensure they are still recorded even if we skip confirmation
 	for _, headerName := range candidateHeaders {
+		if art.WAFBlocked {
+			report.Headers = append(report.Headers, Vulnerability{
+				Name:      headerName,
+				Severity:  "possible", // Base candidate confidence
+				Confirmed: false,
+			})
+			continue
+		}
+
 		if ok, payloads, hasCSP, allowsInline := confirmParameter(targetURL, "header", headerName); ok {
 			severity := "confirmed"
 			name := headerName
@@ -1976,10 +2005,24 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 	}
 
-	targetAlive = isTargetAlive(targetURL)
-	if !targetAlive {
-		logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4, skipping attack", targetURL)
-		art.TargetAlive = false
+	// If WAF was detected, skip Phase 4 completely and return early
+	if art.WAFBlocked {
+		if report.HasVulns() {
+			tg.notify(report)
+		}
+		logReportFindings(&report)
+		return art
+	}
+
+	// Mid-scan re-check #2 (Before Phase 4 Attack)
+	targetAlive, wafDetected = isTargetAlive(targetURL)
+	if !targetAlive || wafDetected {
+		if !targetAlive {
+			logLine("DEAD-MIDSCAN", X_yellow, "%s went dead before Phase 4, skipping attack", targetURL)
+		} else {
+			logLine("WAF-CHALLENGE-MIDSCAN", X_yellow, "%s: WAF challenge re-confirmed before heavy phase, skipping remaining attack steps", targetURL)
+		}
+		art.TargetAlive = targetAlive
 		if report.HasVulns() {
 			tg.notify(report)
 		}
