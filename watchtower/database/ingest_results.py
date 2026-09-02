@@ -35,6 +35,7 @@ SEVERITY_MAP = {
     "possible": "LOW",
 }
 
+# Note: "cookie_bomb" findings arrive with confidence already set to HIGH/MEDIUM by the Go side (pkg/cookiebomb), so no severity remapping is needed here.
 # Map category names to reflection_type values
 CATEGORY_REFLECTION_MAP = {
     "query_parameters": "source_reflection",
@@ -43,6 +44,7 @@ CATEGORY_REFLECTION_MAP = {
     "dom": "dom_sink_injection",
     "open_redirect": "open_redirect",
     "location_injection": "location_header_injection",
+    "cookie_bomb": "cookie_bomb_reflection",
 }
 
 
