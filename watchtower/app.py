@@ -940,8 +940,7 @@ def export_subdomains():
         http_subs = set(Http.objects().distinct('subdomain'))
         q = q.filter(subdomain__in=http_subs) if has_http == 'true' else q.filter(subdomain__nin=http_subs)
 
-    text = '
-'.join(sd.subdomain for sd in q)
+    text = '\n'.join(sd.subdomain for sd in q)
     return app.response_class(text, mimetype='text/plain')
 
 
@@ -960,8 +959,7 @@ def export_urls():
         q = q.filter(status_code=status_code)
 
     urls = [h.url or h.subdomain for h in q if h.url or h.subdomain]
-    return app.response_class('
-'.join(urls), mimetype='text/plain')
+    return app.response_class('\n'.join(urls), mimetype='text/plain')
 
 
 @app.route('/api/export/lives', methods=['GET'])
@@ -984,8 +982,7 @@ def export_lives():
     elif has_cdn == 'false':
         q = q.filter(Q(cdn='') | Q(cdn__exists=False))
 
-    text = '
-'.join(l.subdomain for l in q)
+    text = '\n'.join(l.subdomain for l in q)
     return app.response_class(text, mimetype='text/plain')
 
 
@@ -1015,8 +1012,7 @@ def export_lives_ips():
             if ip:
                 unique_ips.add(ip)
 
-    text = '
-'.join(sorted(list(unique_ips)))
+    text = '\n'.join(sorted(list(unique_ips)))
     return app.response_class(text, mimetype='text/plain')
 
 
