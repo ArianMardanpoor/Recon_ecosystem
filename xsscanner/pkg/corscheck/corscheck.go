@@ -75,8 +75,8 @@ func CheckCORS(targetURL string) []Finding {
 			"Origin": originValue,
 		}
 
-		// Single execution (15s timeout), no retries for CORS checks
-		_, respHeaders, _, err := curlRequestAttempt(targetURL, "GET", headers, 15)
+		// Execution with exactly one retry on OOM/timeout for CORS checks
+		_, respHeaders, _, err := curlRequestAttemptWithRetry(targetURL, "GET", headers, 15)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[corscheck] Curl error on %s (variant: %s): %v\n", targetURL, variant, err)
 			continue
@@ -107,6 +107,19 @@ func CheckCORS(targetURL string) []Finding {
 	}
 
 	return findings
+}
+
+// curlRequestAttemptWithRetry wraps curlRequestAttempt to mitigate OS OOM-kill risks.
+// CheckCORS fires ~13 sequential curl processes per target. On constrained single-core/2GB VPS hosts,
+// this burst can occasionally trigger the OS OOM-killer (yielding "signal: killed") or general
+// timeouts (statusCode 0). This wrapper catches those specific failures and retries exactly once
+// with a doubled timeout to prevent silently dropping variants, without overloading the host.
+func curlRequestAttemptWithRetry(targetURL, method string, headers map[string]string, timeout int) (statusCode int, respHeaders map[string]string, respBody []byte, err error) {
+	statusCode, respHeaders, respBody, err = curlRequestAttempt(targetURL, method, headers, timeout)
+	if err != nil && (strings.Contains(err.Error(), "signal: killed") || statusCode == 0) {
+		return curlRequestAttempt(targetURL, method, headers, timeout*2)
+	}
+	return statusCode, respHeaders, respBody, err
 }
 
 // curlRequestAttempt mirrors the core curl-exec and header parsing pattern from xssniper.go
