@@ -57,7 +57,7 @@ RUN curl -sSL "https://github.com/owasp-amass/amass/releases/download/v4.2.0/ama
 RUN curl -sSL --proto '=https' --tlsv1.2 https://sh.rustup.rs -o /tmp/rustup.sh \
     && sh /tmp/rustup.sh -y --profile minimal \
     && . "$HOME/.cargo/env" \
-    && git clone --depth 1 https://github.com/sh1yo/x8 /tmp/x8-build \
+    && git -c http.version=HTTP/1.1 clone --depth 1 https://github.com/sh1yo/x8 /tmp/x8-build \
     && cd /tmp/x8-build \
     && cargo build --release \
     && cp ./target/release/x8 /usr/local/bin/ \
