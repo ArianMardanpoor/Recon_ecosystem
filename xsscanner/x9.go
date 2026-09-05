@@ -1,13 +1,3 @@
-// FILE: x9.go — MODIFIED
-//
-// SUMMARY OF NEW FLAGS:
-// -path-inject   : Generates an additional URL where the payload is appended as a new path
-//                  segment (e.g., /original/path/payload) and writes to `.path` file.
-// -encoding      : Accepts "single" (default) or "double". If "double", it outputs BOTH
-//                  single and double-encoded variants of the query parameter payload.
-// -value-strategy: Accepts "replace" (default) or "append". If "append", the payload is
-//                  appended to the parameter's existing value rather than overwriting it.
-
 package main
 
 import (
@@ -18,10 +8,16 @@ import (
 	"math/rand"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
 	"reconpipeline/pkg/reporter"
+)
+
+var (
+	rxNumeric = regexp.MustCompile(`^[0-9]+$`)
+	rxAlnum   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
 
 type Stats struct {
@@ -60,7 +56,11 @@ var targetHeaders = []string{
 }
 
 func randomString(n int) string {
-	var letters = []rune("abcdefghijklmnopqrstuvwxyz")
+	return randomStringFrom("abcdefghijklmnopqrstuvwxyz", n)
+}
+
+func randomStringFrom(charset string, n int) string {
+	letters := []rune(charset)
 	s := make([]rune, n)
 	for i := range s {
 		s[i] = letters[rand.Intn(len(letters))]
@@ -68,26 +68,31 @@ func randomString(n int) string {
 	return string(s)
 }
 
-// Leading markers let the verifier look for the exact two-character sequence
-// (quoteChar + quoteChar, since buildURLSafe's own URL-encoding of the
-// value means the original context quote plus our injected quote appear
-// back to back) immediately before the canary, which is robust
-// regardless of what appears after the injection point in the response
-// (truncation, filtering, etc. downstream of the injection point no
-// longer matters).
 func getBreakPayloads() []string {
 	prefix := "x9" + randomString(3)
 	return []string{
-		prefix + "'",
-		prefix + "\"",
-		prefix + "`",
-		prefix + "<",
-		prefix + ";",
-		prefix + "{{",
-		"\"" + prefix,  // NEW: leading double-quote marker
-		"'" + prefix,   // NEW: leading single-quote marker
-		"<b9" + prefix, // NEW: leading tag-open marker
+		prefix + "'" + randomString(6),
+		prefix + "\"" + randomString(6),
+		prefix + "</test",
 	}
+}
+
+func mutateSiblingValue(orig string) string {
+	l := len(orig)
+	if l == 0 {
+		return "x9m"
+	}
+	if rxNumeric.MatchString(orig) {
+		return randomStringFrom("0123456789", l)
+	}
+	if rxAlnum.MatchString(orig) {
+		return randomStringFrom("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", l)
+	}
+	// Fallback for complex/long strings
+	if l > 50 {
+		l = 50
+	}
+	return randomStringFrom("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", l)
 }
 
 type ParsedURL struct {
@@ -140,8 +145,6 @@ func buildURL(base *ParsedURL, params map[string]string) string {
 	return u.String()
 }
 
-// buildURLSafe acts as a safety net ensuring that query parameter modifications
-// never silently alter or drop the base URL's intended path.
 func buildURLSafe(base *ParsedURL, params map[string]string) (string, bool) {
 	constructedURL := buildURL(base, params)
 
@@ -167,42 +170,6 @@ func buildURLSafe(base *ParsedURL, params map[string]string) (string, bool) {
 	return constructedURL, true
 }
 
-// getAllParams now accepts a 'strict' flag.
-// When strict=true, defaultParams are NOT added; only original params and those from paramFile are used.
-func getAllParams(originalParams map[string]string, paramFile string, probeMode bool, strict bool) []string {
-	allParamsMap := make(map[string]bool)
-	for k := range originalParams {
-		allParamsMap[k] = true
-	}
-
-	// Only add defaultParams if strict is false and (probeMode or no original params)
-	if !strict && (probeMode || len(allParamsMap) == 0) {
-		for _, p := range defaultParams {
-			allParamsMap[p] = true
-		}
-	}
-
-	if paramFile != "" {
-		file, err := os.Open(paramFile)
-		if err == nil {
-			sc := bufio.NewScanner(file)
-			for sc.Scan() {
-				p := strings.TrimSpace(sc.Text())
-				if p != "" {
-					allParamsMap[p] = true
-				}
-			}
-			file.Close()
-		}
-	}
-	result := make([]string, 0, len(allParamsMap))
-	for p := range allParamsMap {
-		result = append(result, p)
-	}
-	sort.Strings(result)
-	return result
-}
-
 func main() {
 	var (
 		inputFile    string
@@ -214,9 +181,10 @@ func main() {
 		headerMode   bool
 		domMode      bool
 		strictMode   bool
-		pathInject   bool   // NEW
-		encodingType string // NEW
-		valStrategy  string // NEW
+		pathInject   bool
+		encodingType string
+		valStrategy  string
+		paramModeStr string
 	)
 
 	flag.StringVar(&inputFile, "i", "", "File containing URLs")
@@ -228,10 +196,37 @@ func main() {
 	flag.BoolVar(&headerMode, "headers", false, "Enable Header injection mode")
 	flag.BoolVar(&domMode, "dom", false, "Enable DOM fragment injection mode")
 	flag.BoolVar(&strictMode, "strict", false, "Only use existing parameters, no default list")
-	flag.BoolVar(&pathInject, "path-inject", false, "Inject payloads directly into the URL path as a new segment")                           // NEW
-	flag.StringVar(&encodingType, "encoding", "single", "Encoding type: 'single' or 'double' (if double, generates both single and double)") // NEW
-	flag.StringVar(&valStrategy, "value-strategy", "replace", "Value strategy: 'replace' or 'append' to parameter's original value")         // NEW
+	flag.BoolVar(&pathInject, "path-inject", false, "Inject payloads directly into the URL path as a new segment")
+	flag.StringVar(&encodingType, "encoding", "single", "Encoding type: 'single' or 'double'")
+	flag.StringVar(&valStrategy, "value-strategy", "replace", "Value strategy: 'replace' or 'append'")
+	flag.StringVar(&paramModeStr, "param-mode", "baseline,discovered", "Modes: baseline, discovered, mutate-siblings, or all")
 	flag.Parse()
+
+	// Parse and validate param-mode
+	var activeModes []string
+	modesMap := make(map[string]bool)
+	hasAll := false
+
+	for _, part := range strings.Split(paramModeStr, ",") {
+		part = strings.TrimSpace(part)
+		if part == "all" {
+			hasAll = true
+			break
+		}
+		if part != "baseline" && part != "discovered" && part != "mutate-siblings" {
+			fmt.Fprintf(os.Stderr, "[ERROR] Invalid param-mode '%s'. Allowed: baseline, discovered, mutate-siblings, all\n", part)
+			os.Exit(1)
+		}
+		if !modesMap[part] {
+			modesMap[part] = true
+			activeModes = append(activeModes, part)
+		}
+	}
+
+	if hasAll {
+		activeModes = []string{"baseline", "discovered", "mutate-siblings"}
+	}
+	fmt.Fprintf(os.Stderr, "[x9] param-mode active: %s\n", strings.Join(activeModes, ", "))
 
 	repLogger, err := reporter.NewLogger("results/raw_findings.jsonl")
 	if err != nil {
@@ -241,6 +236,20 @@ func main() {
 	if inputFile == "" && singleURL == "" {
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	// Pre-load param file contents once
+	var fileParams []string
+	if paramFile != "" {
+		if file, err := os.Open(paramFile); err == nil {
+			sc := bufio.NewScanner(file)
+			for sc.Scan() {
+				if p := strings.TrimSpace(sc.Text()); p != "" {
+					fileParams = append(fileParams, p)
+				}
+			}
+			file.Close()
+		}
 	}
 
 	var rawURLs []string
@@ -295,7 +304,6 @@ func main() {
 			continue
 		}
 
-		// If strict mode is enabled and the URL has no query parameters, skip it.
 		if strictMode && len(base.Params) == 0 {
 			fmt.Fprintf(os.Stderr, "[SKIP] no params in URL, strict mode active: %s\n", raw)
 			continue
@@ -308,51 +316,90 @@ func main() {
 			payloads = getBreakPayloads()
 		}
 
-		// Pass strictMode to getAllParams
-		allParams := getAllParams(base.Params, paramFile, probeMode, strictMode)
+		// Build baseline targets
+		baselineMap := make(map[string]bool)
+		for k := range base.Params {
+			baselineMap[k] = true
+		}
+		if !strictMode && (probeMode || len(baselineMap) == 0) {
+			for _, p := range defaultParams {
+				baselineMap[p] = true
+			}
+		}
+		var baselineTargets []string
+		for k := range baselineMap {
+			baselineTargets = append(baselineTargets, k)
+		}
+		sort.Strings(baselineTargets)
+
+		// Build discovered targets
+		discoveredMap := make(map[string]bool)
+		for _, k := range baselineTargets {
+			discoveredMap[k] = true
+		}
+		for _, p := range fileParams {
+			discoveredMap[p] = true
+		}
+		var discoveredTargets []string
+		for k := range discoveredMap {
+			discoveredTargets = append(discoveredTargets, k)
+		}
+		sort.Strings(discoveredTargets)
 
 		for _, payload := range payloads {
-			// 1. Standard URL Parameters (incorporating Double-Encoding and Value Strategy)
-			for _, p := range allParams {
-				for _, enc := range encodings {
-					newParams := make(map[string]string)
-					for k, v := range base.Params {
-						newParams[k] = v
+			// 1. Standard URL Parameters (GET) with Param Modes
+			for _, mode := range activeModes {
+				currentTargets := baselineTargets
+				if mode == "discovered" {
+					currentTargets = discoveredTargets
+				}
+
+				for _, p := range currentTargets {
+					for _, enc := range encodings {
+						newParams := make(map[string]string)
+
+						// Populate sibling parameters
+						for k, v := range base.Params {
+							if k == p {
+								continue // Handled below
+							}
+							if mode == "mutate-siblings" {
+								newParams[k] = mutateSiblingValue(v)
+							} else {
+								newParams[k] = v
+							}
+						}
+
+						// Prepare payload encoding & value strategy
+						activePayload := payload
+						if enc == "double" {
+							activePayload = url.QueryEscape(payload)
+						}
+
+						injectedVal := activePayload
+						if valStrategy == "append" {
+							injectedVal = base.Params[p] + activePayload
+						}
+						newParams[p] = injectedVal
+
+						generatedURL, ok := buildURLSafe(base, newParams)
+						if !ok {
+							continue
+						}
+
+						fmt.Fprintln(fGet, generatedURL)
+						repLogger.Log(reporter.NewFinding(
+							base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
+							reporter.Context{Location: fmt.Sprintf("query parameter (mode: %s)", mode)},
+						))
 					}
-
-					// Prepare payload encoding
-					// buildURLSafe will automatically encode the value once.
-					// If we pre-encode it here, it gets double encoded.
-					activePayload := payload
-					if enc == "double" {
-						activePayload = url.QueryEscape(payload)
-					}
-
-					// Value Strategy implementation
-					injectedVal := activePayload
-					if valStrategy == "append" {
-						injectedVal = base.Params[p] + activePayload
-					}
-
-					newParams[p] = injectedVal
-
-					generatedURL, ok := buildURLSafe(base, newParams)
-					if !ok {
-						continue // Skip malicious payload generation if the path dropped
-					}
-
-					fmt.Fprintln(fGet, generatedURL)
-					repLogger.Log(reporter.NewFinding(
-						base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
-						reporter.Context{Location: "query parameter"},
-					))
 				}
 			}
 
-			// 2. JSON Body Mode
+			// 2. JSON Body Mode (Uses baselineTargets)
 			if jsonMode && fJson != nil {
 				jsonData := make(map[string]string)
-				for _, p := range allParams {
+				for _, p := range baselineTargets {
 					jsonData[p] = payload
 				}
 				jsonStr, _ := json.Marshal(jsonData)
@@ -368,17 +415,12 @@ func main() {
 
 			// 4. DOM Fragment Injection Mode
 			if domMode {
-				// FRAGMENT INJECTION REVIEW: Reviewed against legacy buildFragmentInjectionURLs().
-				// GAP FOUND: The existing logic (buildURLSafe) reconstructed the raw query string
-				// from base.Params, which strips duplicate parameters and changes original parameter order.
-				// FIX: Manually format using base.RawQuery to perfectly preserve the query string shape.
-
 				domURL := &url.URL{
 					Scheme:   base.Scheme,
 					Host:     base.Host,
 					Path:     base.Path,
 					RawQuery: base.RawQuery,
-					Fragment: payload, // url.URL stringification safely escapes the fragment
+					Fragment: payload,
 				}
 				urlWithFragment := domURL.String()
 
@@ -395,8 +437,6 @@ func main() {
 
 			// 5. Path Injection Mode
 			if pathInject && fPath != nil {
-				// Construct path manually to prevent unintended auto-encoding of slashes/characters,
-				// matching legacy structural logic while avoiding buildURLSafe checks since path mutates.
 				newPath := strings.TrimRight(base.Path, "/") + "/" + payload
 
 				pathURL := fmt.Sprintf("%s://%s%s", base.Scheme, base.Host, newPath)

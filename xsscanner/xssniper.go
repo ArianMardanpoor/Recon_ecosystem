@@ -1159,7 +1159,45 @@ func reflectionExistsVerified(targetURL, method string, headers map[string]strin
 	return isConfirmed, false, respHeaders
 }
 
-func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool) {
+func doubleEncode(s string) string {
+	s = strings.ReplaceAll(s, "%", "%25")
+	s = strings.ReplaceAll(s, "'", "%2527")
+	s = strings.ReplaceAll(s, "\"", "%2522")
+	s = strings.ReplaceAll(s, "<", "%253C")
+	s = strings.ReplaceAll(s, ">", "%253E")
+	return s
+}
+
+func reflectionExistsVerifiedPair(targetURL, method string, headers map[string]string, reqBody, payload string, markerChar byte, canary string) (bool, string, bool, map[string]string) {
+	ratelimit.Acquire(targetURL)
+
+	finalURL := targetURL
+	if method == "GET" {
+		if u, err := url.Parse(targetURL); err == nil {
+			q := u.Query()
+			cbName := "_cb"
+			_, exists := q[cbName]
+			for exists {
+				cbName = "_cb" + randomString(3)
+				_, exists = q[cbName]
+			}
+			q.Set(cbName, fmt.Sprintf("%d_%s", time.Now().UnixNano(), randomString(4)))
+			u.RawQuery = q.Encode()
+			finalURL = u.String()
+		}
+	}
+
+	statusCode, respHeaders, respBody, err := curlRequest(finalURL, method, headers, reqBody, 15)
+	if err != nil || statusCode == 0 {
+		return false, "", true, nil
+	}
+
+	isConfirmed, reflType := reflectctx.VerifyBreakoutPair(respBody, canary, markerChar)
+
+	return isConfirmed, reflType, false, respHeaders
+}
+
+func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool, string) {
 	prefix := "x9" + randomString(3)
 
 	type pSpec struct {
@@ -1168,68 +1206,79 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 	}
 
 	specs := []pSpec{
-		{prefix + "'", '\''},
-		{prefix + "\"", '"'},
-		{prefix + "`", '`'},
-		{prefix + "<", '<'},
-		{prefix + ";", ';'},
-		{prefix + "{{", '{'},
-		{"\"" + prefix, '"'},
-		{"'" + prefix, '\''},
-		{"<b9" + prefix, '<'},
+		{prefix + "'" + randomString(6), '\''},
+		{prefix + "\"" + randomString(6), '"'},
+		{prefix + "</test", '<'},
 	}
 
 	var confirmed []string
 	var finalHasCSP, finalAllowsInline bool
 	consecutiveFails := 0
+	bestReflType := ""
 
 	for _, spec := range specs {
-		method := "GET"
-		headers := make(map[string]string)
-		reqBody := ""
-		finalURL := targetURL
-
-		u, err := url.Parse(targetURL)
-		if err != nil {
-			continue
-		}
-
-		switch phase {
-		case "get":
-			q := u.Query()
-			q.Set(name, spec.payload)
-			u.RawQuery = q.Encode()
-			finalURL = u.String()
-		case "header":
-			headers[name] = spec.payload
-		case "json":
-			method = "POST"
-			data := make(map[string]interface{})
-			data[name] = spec.payload
-			b, _ := json.Marshal(data)
-			reqBody = string(b)
-		}
-
-		isConfirmed, isHardFail, respHeaders := reflectionExistsVerified(finalURL, method, headers, reqBody, spec.payload, spec.marker)
-
-		if isHardFail {
-			consecutiveFails++
-			if consecutiveFails >= 3 {
-				logLine("DEAD-MIDSCAN", X_yellow, "%s: 3 consecutive connection failures during confirm, aborting remaining payloads for parameter %s", targetURL, name)
-				break
+		for _, doDoubleEncode := range []bool{false, true} {
+			payloadToSend := spec.payload
+			if doDoubleEncode {
+				payloadToSend = doubleEncode(spec.payload)
 			}
-		} else {
-			consecutiveFails = 0
-		}
 
-		if isConfirmed {
-			confirmed = append(confirmed, spec.payload)
-			allowsInline, hasCSP := extractCSP(respHeaders)
-			finalHasCSP = hasCSP
-			finalAllowsInline = allowsInline
+			method := "GET"
+			headers := make(map[string]string)
+			reqBody := ""
+			finalURL := targetURL
+
+			u, err := url.Parse(targetURL)
+			if err != nil {
+				continue
+			}
+
+			switch phase {
+			case "get":
+				q := u.Query()
+				q.Set(name, payloadToSend)
+				u.RawQuery = q.Encode()
+				finalURL = u.String()
+			case "header":
+				headers[name] = payloadToSend
+			case "json":
+				method = "POST"
+				data := make(map[string]interface{})
+				data[name] = payloadToSend
+				b, _ := json.Marshal(data)
+				reqBody = string(b)
+			}
+
+			_, reflType, isHardFail, respHeaders := reflectionExistsVerifiedPair(finalURL, method, headers, reqBody, payloadToSend, spec.marker, prefix)
+
+			if isHardFail {
+				consecutiveFails++
+				if consecutiveFails >= 3 {
+					logLine("DEAD-MIDSCAN", X_yellow, "%s: 3 consecutive connection failures during confirm, aborting remaining payloads for parameter %s", targetURL, name)
+					break
+				}
+			} else {
+				consecutiveFails = 0
+			}
+
+			if reflType != "" {
+				confirmed = append(confirmed, payloadToSend)
+				allowsInline, hasCSP := extractCSP(respHeaders)
+				finalHasCSP = hasCSP
+				finalAllowsInline = allowsInline
+
+				if reflType == "breakout_confirmed_quote" || reflType == "breakout_confirmed_tag" {
+					bestReflType = reflType
+				} else if bestReflType == "" {
+					bestReflType = reflType
+				}
+			}
+		}
+		if consecutiveFails >= 3 {
+			break
 		}
 	}
-	return len(confirmed) > 0, confirmed, finalHasCSP, finalAllowsInline
+	return len(confirmed) > 0, confirmed, finalHasCSP, finalAllowsInline, bestReflType
 }
 
 func reflectionExists(targetURL, method string, headers map[string]string, body, payload string) bool {
@@ -1949,17 +1998,21 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 			if vList != nil {
 				for i := range *vList {
 					name := (*vList)[i].Name
-					if ok, p, hasCSP, allowsInline := confirmParameter(targetURL, probePhase, name); ok {
-						(*vList)[i].Confirmed = true
-
-						if hasCSP && !allowsInline {
-							(*vList)[i].Severity = "likely"
-							note := " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
-							if !strings.Contains((*vList)[i].Name, note) {
-								(*vList)[i].Name += note
+					if ok, p, hasCSP, allowsInline, reflType := confirmParameter(targetURL, probePhase, name); ok {
+						if reflType == "breakout_confirmed_quote" || reflType == "breakout_confirmed_tag" {
+							(*vList)[i].Confirmed = true
+							if hasCSP && !allowsInline {
+								(*vList)[i].Severity = "likely"
+								note := " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+								if !strings.Contains((*vList)[i].Name, note) {
+									(*vList)[i].Name += note
+								}
+							} else {
+								(*vList)[i].Severity = "confirmed"
 							}
-						} else {
-							(*vList)[i].Severity = "confirmed"
+						} else if reflType == "simple_reflection" {
+							(*vList)[i].Confirmed = false
+							(*vList)[i].Severity = "likely"
 						}
 
 						(*vList)[i].Payloads = p
@@ -1981,19 +2034,25 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 			continue
 		}
 
-		if ok, payloads, hasCSP, allowsInline := confirmParameter(targetURL, "header", headerName); ok {
-			severity := "confirmed"
+		if ok, payloads, hasCSP, allowsInline, reflType := confirmParameter(targetURL, "header", headerName); ok {
+			severity := "likely"
+			confirmedField := false
 			name := headerName
 
-			if hasCSP && !allowsInline {
-				severity = "likely"
-				name += " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+			if reflType == "breakout_confirmed_quote" || reflType == "breakout_confirmed_tag" {
+				confirmedField = true
+				if hasCSP && !allowsInline {
+					severity = "likely"
+					name += " (Note: Reflected but page has strict CSP; inline execution likely blocked)"
+				} else {
+					severity = "confirmed"
+				}
 			}
 
 			v := Vulnerability{
 				Name:      name,
 				Severity:  severity,
-				Confirmed: true,
+				Confirmed: confirmedField,
 				Payloads:  payloads,
 			}
 			report.Headers = append(report.Headers, v)

@@ -427,58 +427,124 @@ func checkLocationHeader(rawURL string, opts checkOpts) {
 	}
 }
 
+// doubleEncodeURL replaces single-encoded delimiters in the query string
+// with their double-encoded equivalents (%22->%2522, %27->%2527, %3C->%253C).
+func doubleEncodeURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawQuery == "" {
+		return rawURL
+	}
+
+	q := parsed.RawQuery
+	q = strings.ReplaceAll(q, "%22", "%2522")
+	q = strings.ReplaceAll(q, "%27", "%2527")
+	q = strings.ReplaceAll(q, "%3C", "%253C")
+	q = strings.ReplaceAll(q, "%3c", "%253c") // Catch lower-cased hex variants
+
+	parsed.RawQuery = q
+	return parsed.String()
+}
+
 func checkURL(rawURL string, opts checkOpts) {
-	payload := getDecodedPayload(rawURL)
-	if payload == "" {
-		return
+	// Prepare URL variants: Standard, and optionally Double-Encoded for XSS mode.
+	variants := []struct {
+		url             string
+		isDoubleEncoded bool
+	}{
+		{url: rawURL, isDoubleEncoded: false},
 	}
-
-	status, body, err := curlAttempt(rawURL, opts.timeout)
-	if err != nil || status == 0 {
-		retryTimeout := opts.timeout * 2
-		status, body, err = curlAttempt(rawURL, retryTimeout)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s after retry (timeout=%ds then %ds): %v\n",
-				rawURL, opts.timeout, retryTimeout, err)
-			return
-		}
-	}
-	if status == 0 {
-		fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000) even after retry\n", rawURL)
-		return
-	}
-
-	var matched bool
-	var sinkStr = "body_reflection"
 
 	if opts.xssMode {
-		marker, ok := extractMarkerChar(payload)
-		if !ok {
-			fmt.Fprintf(os.Stderr, "[WARN] Could not determine marker char for payload %q in %s, falling back to regex\n", payload, rawURL)
-			matched = xssRe.Match(body)
-		} else {
-			// ✅ استخراج کانری خام (بدون مارکر)
-			bareCanary := reflectctx.ExtractCanary(payload)
-			isConfirmed, ctxType := reflectctx.VerifyBreakout(body, bareCanary, marker)
-			matched = isConfirmed
-			if matched && ctxType != reflectctx.ContextUnknown {
-				sinkStr = "body_reflection:" + string(ctxType)
-			}
+		dblURL := doubleEncodeURL(rawURL)
+		if dblURL != rawURL {
+			variants = append(variants, struct {
+				url             string
+				isDoubleEncoded bool
+			}{url: dblURL, isDoubleEncoded: true})
 		}
-	} else {
-		matched = canaryRe.Match(body) && bytes.Contains(body, []byte(payload))
 	}
 
-	if matched {
+	var bestSink string
+	var bestStatus int
+	var bestMatched bool
+	var confirmedHigh bool
+
+	for _, v := range variants {
+		payload := getDecodedPayload(v.url)
+		if payload == "" {
+			continue
+		}
+
+		status, body, err := curlAttempt(v.url, opts.timeout)
+		if err != nil || status == 0 {
+			retryTimeout := opts.timeout * 2
+			status, body, err = curlAttempt(v.url, retryTimeout)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s after retry (timeout=%ds then %ds): %v\n",
+					v.url, opts.timeout, retryTimeout, err)
+				continue
+			}
+		}
+		if status == 0 {
+			fmt.Fprintf(os.Stderr, "[ERROR] curl failed for %s: no HTTP response (status 000) even after retry\n", v.url)
+			continue
+		}
+
+		var matched bool
+		var sinkStr string
+
+		if opts.xssMode {
+			canary, marker, ok := reflectctx.ExtractCanaryFromPairPayload(payload)
+			if !ok {
+				fmt.Fprintf(os.Stderr, "[WARN] Could not determine marker char for pair payload %q in %s, falling back to regex\n", payload, v.url)
+				if xssRe.Match(body) {
+					matched = true
+					sinkStr = "body_reflection:simple_reflection"
+				}
+			} else {
+				isConfirmed, reflType := reflectctx.VerifyBreakoutPair(body, canary, marker)
+				if isConfirmed {
+					matched = true
+					confirmedHigh = true
+					sinkStr = "body_reflection:" + reflType
+				} else if reflType == "simple_reflection" {
+					matched = true
+					sinkStr = "body_reflection:simple_reflection"
+				}
+			}
+
+			// Tag successful findings originating from the double-encoded variant
+			if matched && v.isDoubleEncoded {
+				sinkStr += ":double_encoded"
+			}
+		} else {
+			matched = canaryRe.Match(body) && bytes.Contains(body, []byte(payload))
+			if matched {
+				sinkStr = "body_reflection"
+				confirmedHigh = true
+			}
+		}
+
+		if matched {
+			bestSink = sinkStr
+			bestStatus = status
+			bestMatched = true
+			if confirmedHigh {
+				break // Stop checking further variants if a high-confidence breakout is already confirmed
+			}
+		} else if status >= 400 {
+			fmt.Fprintf(os.Stderr, "[INFO] %s: HTTP %d, no reflection found in body (len=%d)\n", v.url, status, len(body))
+		}
+	}
+
+	if bestMatched {
 		result := DomSinkOutput{
-			URL:        rawURL,
-			Sinks:      []string{sinkStr},
-			StatusCode: status,
+			URL:        rawURL, // Report against the original URL so downstream maps it correctly
+			Sinks:      []string{bestSink},
+			StatusCode: bestStatus,
 		}
 		opts.outMu.Lock()
 		_ = json.NewEncoder(os.Stdout).Encode(result)
 		opts.outMu.Unlock()
-	} else if status >= 400 {
-		fmt.Fprintf(os.Stderr, "[INFO] %s: HTTP %d, no reflection found in body (len=%d)\n", rawURL, status, len(body))
 	}
 }

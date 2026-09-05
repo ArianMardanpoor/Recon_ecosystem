@@ -265,3 +265,75 @@ func ExtractCanary(full string) string {
 	// for probe mode or unexpected cases.
 	return full
 }
+
+// ExtractCanaryFromPairPayload parses a payload string into its canary and marker components.
+func ExtractCanaryFromPairPayload(payload string) (canary string, marker byte, ok bool) {
+	if idx := strings.Index(payload, "</test"); idx != -1 {
+		return payload[:idx], '<', true
+	}
+	if idx := strings.IndexByte(payload, '"'); idx != -1 {
+		return payload[:idx], '"', true
+	}
+	if idx := strings.IndexByte(payload, '\''); idx != -1 {
+		return payload[:idx], '\'', true
+	}
+	return "", 0, false
+}
+
+// VerifyBreakoutPair verifies if a payload successfully escaped its context by finding
+// an unescaped closing delimiter provided by the original template.
+func VerifyBreakoutPair(body []byte, canary string, markerChar byte) (confirmed bool, reflType string) {
+	canaryBytes := []byte(canary)
+	canaryLen := len(canaryBytes)
+	offset := 0
+	foundAny := false
+
+	for {
+		idx := bytes.Index(body[offset:], canaryBytes)
+		if idx == -1 {
+			break
+		}
+		foundAny = true
+		actualIdx := offset + idx
+		ctx := ClassifyContext(body, actualIdx)
+		afterCanaryIdx := actualIdx + canaryLen
+
+		if markerChar == '\'' || markerChar == '"' {
+			if (ctx.Type == ContextHTMLAttrQuoted || ctx.Type == ContextJSString) && ctx.QuoteChar == markerChar {
+				if afterCanaryIdx < len(body) && body[afterCanaryIdx] == markerChar {
+					startScan := afterCanaryIdx + 1
+					endScan := startScan + 300
+					if endScan > len(body) {
+						endScan = len(body)
+					}
+
+					for i := startScan; i < endScan; i++ {
+						if body[i] == markerChar {
+							if ctx.Type == ContextJSString && IsEscaped(body, i) {
+								continue
+							}
+							return true, "breakout_confirmed_quote"
+						}
+					}
+				}
+			}
+		} else if markerChar == '<' {
+			if ctx.Type == ContextHTMLBody {
+				tagPayload := []byte("</test")
+				if afterCanaryIdx+len(tagPayload) <= len(body) {
+					// Since we are matching literal '<', we inherently reject "&lt;"
+					if bytes.Equal(body[afterCanaryIdx:afterCanaryIdx+len(tagPayload)], tagPayload) {
+						return true, "breakout_confirmed_tag"
+					}
+				}
+			}
+		}
+
+		offset = actualIdx + canaryLen
+	}
+
+	if foundAny {
+		return false, "simple_reflection"
+	}
+	return false, ""
+}
