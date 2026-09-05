@@ -372,8 +372,10 @@ func main() {
 
 						// Prepare payload encoding & value strategy
 						activePayload := payload
+						tier := "single"
 						if enc == "double" {
 							activePayload = url.QueryEscape(payload)
+							tier = "double"
 						}
 
 						injectedVal := activePayload
@@ -387,10 +389,20 @@ func main() {
 							continue
 						}
 
+						// Track actual wire-transmitted value
+						wireVal := url.QueryEscape(injectedVal)
+						labeledPayload := fmt.Sprintf("%s: %s", tier, wireVal)
+
 						fmt.Fprintln(fGet, generatedURL)
 						repLogger.Log(reporter.NewFinding(
 							base.Host, generatedURL, p, "x9", "LOW", "candidate_generated",
-							reporter.Context{Location: fmt.Sprintf("query parameter (mode: %s)", mode)},
+							reporter.Context{
+								Location: fmt.Sprintf("query parameter (mode: %s)", mode),
+								AllowedChars: []string{
+									fmt.Sprintf("logical: %s", payload),
+									labeledPayload,
+								},
+							},
 						))
 					}
 				}

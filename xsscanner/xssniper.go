@@ -1219,8 +1219,10 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 	for _, spec := range specs {
 		for _, doDoubleEncode := range []bool{false, true} {
 			payloadToSend := spec.payload
+			tier := "single"
 			if doDoubleEncode {
 				payloadToSend = doubleEncode(spec.payload)
+				tier = "double"
 			}
 
 			method := "GET"
@@ -1262,7 +1264,17 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 			}
 
 			if reflType != "" {
-				confirmed = append(confirmed, payloadToSend)
+				wirePayload := payloadToSend
+				if phase == "get" {
+					wirePayload = url.QueryEscape(payloadToSend)
+				} else if phase == "json" {
+					b, _ := json.Marshal(payloadToSend)
+					wirePayload = string(b)
+				}
+
+				labeledPayload := fmt.Sprintf("%s: %s", tier, wirePayload)
+				confirmed = append(confirmed, labeledPayload)
+
 				allowsInline, hasCSP := extractCSP(respHeaders)
 				finalHasCSP = hasCSP
 				finalAllowsInline = allowsInline
@@ -1391,10 +1403,12 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 			continue
 		}
 		var paramName string
+		var wireVal string
 		for k, v := range parsed.Query() {
 			for _, val := range v {
 				if strings.Contains(val, payload) {
 					paramName = k
+					wireVal = url.QueryEscape(val)
 					break
 				}
 			}
@@ -1406,18 +1420,24 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 			continue
 		}
 
+		tier := "single"
+		if strings.Contains(wireVal, "%25") {
+			tier = "double"
+		}
+		labeledPayload := fmt.Sprintf("%s: %s", tier, wireVal)
+
 		switch phase {
 		case "get":
 			if existing, ok := paramMap[paramName]; ok {
 				exists := false
 				for _, p := range existing.Payloads {
-					if p == payload {
+					if p == labeledPayload {
 						exists = true
 						break
 					}
 				}
 				if !exists {
-					existing.Payloads = append(existing.Payloads, payload)
+					existing.Payloads = append(existing.Payloads, labeledPayload)
 				}
 				if severityWeight("confirmed") > severityWeight(existing.Severity) {
 					existing.Severity = "confirmed"
@@ -1427,7 +1447,7 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				paramMap[paramName] = &Vulnerability{
 					Name:      paramName,
 					Severity:  "confirmed",
-					Payloads:  []string{payload},
+					Payloads:  []string{labeledPayload},
 					Confirmed: true,
 				}
 			}
@@ -1447,13 +1467,13 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 			if existing, ok := paramMap[paramName]; ok {
 				exists := false
 				for _, p := range existing.Payloads {
-					if p == payload {
+					if p == labeledPayload {
 						exists = true
 						break
 					}
 				}
 				if !exists {
-					existing.Payloads = append(existing.Payloads, payload)
+					existing.Payloads = append(existing.Payloads, labeledPayload)
 				}
 				if existing.Severity != "likely" {
 					existing.Severity = "likely"
@@ -1462,7 +1482,7 @@ func aggregateCurlFindings(report *VulnerabilityReport, reflectedURLs []string, 
 				paramMap[paramName] = &Vulnerability{
 					Name:      paramName,
 					Severity:  "likely",
-					Payloads:  []string{payload},
+					Payloads:  []string{labeledPayload},
 					Confirmed: false,
 				}
 			}
@@ -1542,10 +1562,12 @@ func aggregateLocationFindings(report *VulnerabilityReport, openRedirects []stri
 				continue
 			}
 			var paramName string
+			var wireVal string
 			for k, v := range parsed.Query() {
 				for _, val := range v {
 					if strings.Contains(val, payload) {
 						paramName = k
+						wireVal = url.QueryEscape(val)
 						break
 					}
 				}
@@ -1556,6 +1578,12 @@ func aggregateLocationFindings(report *VulnerabilityReport, openRedirects []stri
 			if paramName == "" {
 				continue
 			}
+
+			tier := "single"
+			if strings.Contains(wireVal, "%25") {
+				tier = "double"
+			}
+			labeledPayload := fmt.Sprintf("%s: %s", tier, wireVal)
 
 			severity := "likely"
 			confirmed := false
@@ -1583,13 +1611,13 @@ func aggregateLocationFindings(report *VulnerabilityReport, openRedirects []stri
 			if existing, ok := paramMap[paramName]; ok {
 				exists := false
 				for _, p := range existing.Payloads {
-					if p == payload {
+					if p == labeledPayload {
 						exists = true
 						break
 					}
 				}
 				if !exists {
-					existing.Payloads = append(existing.Payloads, payload)
+					existing.Payloads = append(existing.Payloads, labeledPayload)
 				}
 				if severityWeight(severity) > severityWeight(existing.Severity) {
 					existing.Severity = severity
@@ -1599,7 +1627,7 @@ func aggregateLocationFindings(report *VulnerabilityReport, openRedirects []stri
 				paramMap[paramName] = &Vulnerability{
 					Name:      paramName,
 					Severity:  severity,
-					Payloads:  []string{payload},
+					Payloads:  []string{labeledPayload},
 					Confirmed: confirmed,
 				}
 			}
@@ -2116,7 +2144,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		atkIn := filepath.Join(outputDir, safeName(targetURL)+"-http-atk-in.txt")
 		os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(httpAtkUrls), "\n")), 0644)
 		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-http")
-		
+
 		// 2. Attack-Stage Invocation (CORRECTED)
 		atkArgs := []string{"-i", atkIn, "-json", "-headers", "-o", finalX9Base}
 		if paramFile != "" {
@@ -2229,7 +2257,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 
 	return art
 }
-
 
 func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	report := VulnerabilityReport{URL: art.TargetURL}
