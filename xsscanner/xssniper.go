@@ -1714,22 +1714,12 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	probeOutputBase := filepath.Join(outputDir, safeName(targetURL)+"-probe-out")
 	art.ProbeOutputBase = probeOutputBase
 
-	// 1. Initial Probe Invocation
-	xArgs := []string{"-probe", "-json", "-headers", "-dom"}
+	// 1. Initial Probe Invocation (CORRECTED)
+	xArgs := []string{"-i", probeInput, "-probe", "-json", "-headers", "-dom", "-o", probeOutputBase}
 	if paramFile != "" {
 		xArgs = append(xArgs, "-p", paramFile)
 	}
-	// Execute probe with expanded args
 	runCommand("./x9", xArgs...)
-
-	// ... [intermediate code] ...
-
-	// 2. Attack-Stage Invocation
-	atkArgs := []string{"-i", atkIn, "-json", "-headers", "-o", finalX9Base}
-	if paramFile != "" {
-		atkArgs = append(atkArgs, "-p", paramFile)
-	}
-	runCommand("./x9", atkArgs...)
 
 	domQueryProbeFile := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-probe.txt")
 	art.DomQueryProbeFile = domQueryProbeFile
@@ -1803,7 +1793,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 				))
 			}
 
-			// Only output HIGH confidence findings to stdout to avoid terminal noise
 			if finding.Confidence == "HIGH" {
 				logLine("CORS", X_yellow, "%s: CORS misconfig (%s, origin=%s, creds=%v)",
 					targetURL, finding.Confidence, finding.Origin, finding.AllowCredentials)
@@ -1822,7 +1811,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	}
 	art.TargetAlive = targetAlive
 	art.HasJS = hasJS
-	art.WAFBlocked = wafDetected // Capture WAF state immediately
+	art.WAFBlocked = wafDetected
 
 	probeFiles := map[string]string{
 		probeOutputBase + ".get":    "get",
@@ -1961,11 +1950,9 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// If WAF was detected at the start, log it and gate the heavy phases.
 	if art.WAFBlocked {
 		logLine("WAF-BLOCKED", X_yellow, "%s: WAF challenge detected — recording %d candidate params/headers but skipping confirm+attack (manual review recommended)", targetURL, len(getParamSet)+len(candidateHeaders))
 	} else {
-		// Mid-scan re-check #1 (Before Phase 4b)
 		targetAlive, wafDetected = isTargetAlive(targetURL)
 		if !targetAlive || wafDetected {
 			if !targetAlive {
@@ -1987,7 +1974,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		confirmedParams[p] = make(map[string]bool)
 	}
 
-	// ALWAYS aggregate findings first (so they are reported as candidates if WAF skips confirm/attack)
 	for probePhase, urls := range p3Findings {
 		dummy := ""
 		for _, u := range urls {
@@ -1995,7 +1981,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 		report.aggregateFindings(dummy, probePhase)
 
-		// Only run confirmParameter heavy-requests if NOT WAF blocked
 		if !art.WAFBlocked {
 			var vList *[]Vulnerability
 			switch probePhase {
@@ -2033,12 +2018,11 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 	}
 
-	// For candidate headers, ensure they are still recorded even if we skip confirmation
 	for _, headerName := range candidateHeaders {
 		if art.WAFBlocked {
 			report.Headers = append(report.Headers, Vulnerability{
 				Name:      headerName,
-				Severity:  "possible", // Base candidate confidence
+				Severity:  "possible",
 				Confirmed: false,
 			})
 			continue
@@ -2074,7 +2058,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		}
 	}
 
-	// If WAF was detected, skip Phase 4 completely and return early
 	if art.WAFBlocked {
 		if report.HasVulns() {
 			tg.notify(report)
@@ -2083,7 +2066,6 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		return art
 	}
 
-	// Mid-scan re-check #2 (Before Phase 4 Attack)
 	targetAlive, wafDetected = isTargetAlive(targetURL)
 	if !targetAlive || wafDetected {
 		if !targetAlive {
@@ -2134,7 +2116,13 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 		atkIn := filepath.Join(outputDir, safeName(targetURL)+"-http-atk-in.txt")
 		os.WriteFile(atkIn, []byte(strings.Join(dedupeConfirmedURLs(httpAtkUrls), "\n")), 0644)
 		finalX9Base := filepath.Join(outputDir, safeName(targetURL)+"-final-http")
-		runCommand("./x9", "-i", atkIn, "-json", "-headers", "-o", finalX9Base)
+		
+		// 2. Attack-Stage Invocation (CORRECTED)
+		atkArgs := []string{"-i", atkIn, "-json", "-headers", "-o", finalX9Base}
+		if paramFile != "" {
+			atkArgs = append(atkArgs, "-p", paramFile)
+		}
+		runCommand("./x9", atkArgs...)
 
 		exts := map[string]string{".get": "get", ".json": "json"}
 		for ext, ph := range exts {
@@ -2241,6 +2229,7 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 
 	return art
 }
+
 
 func processURLDom(art ProbeArtifacts) VulnerabilityReport {
 	report := VulnerabilityReport{URL: art.TargetURL}
