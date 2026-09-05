@@ -1221,7 +1221,6 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 			payloadToSend := spec.payload
 			tier := "single"
 			if doDoubleEncode {
-				payloadToSend = doubleEncode(spec.payload)
 				tier = "double"
 			}
 
@@ -1238,12 +1237,26 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 			switch phase {
 			case "get":
 				q := u.Query()
-				q.Set(name, payloadToSend)
-				u.RawQuery = q.Encode()
+				if doDoubleEncode {
+					// ابتدا مقدار خام ست شده و توسط q.Encode() یک‌بار انکد می‌شود (مثلاً ' به %27)
+					q.Set(name, spec.payload)
+					u.RawQuery = q.Encode()
+					// سپس علامت‌های % با %25 جایگزین می‌شوند تا دقیقاً Double-Encoding (%2527) روی wire حاصل شود
+					u.RawQuery = strings.ReplaceAll(u.RawQuery, "%", "%25")
+				} else {
+					q.Set(name, payloadToSend)
+					u.RawQuery = q.Encode()
+				}
 				finalURL = u.String()
 			case "header":
+				if doDoubleEncode {
+					payloadToSend = doubleEncode(spec.payload)
+				}
 				headers[name] = payloadToSend
 			case "json":
+				if doDoubleEncode {
+					payloadToSend = doubleEncode(spec.payload)
+				}
 				method = "POST"
 				data := make(map[string]interface{})
 				data[name] = payloadToSend
@@ -1266,7 +1279,11 @@ func confirmParameter(targetURL, phase, name string) (bool, []string, bool, bool
 			if reflType != "" {
 				wirePayload := payloadToSend
 				if phase == "get" {
-					wirePayload = url.QueryEscape(payloadToSend)
+					if doDoubleEncode {
+						wirePayload = doubleEncode(spec.payload)
+					} else {
+						wirePayload = url.QueryEscape(payloadToSend)
+					}
 				} else if phase == "json" {
 					b, _ := json.Marshal(payloadToSend)
 					wirePayload = string(b)
