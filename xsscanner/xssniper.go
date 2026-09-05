@@ -1714,12 +1714,22 @@ func processURLFast(targetURL string, index, total int) ProbeArtifacts {
 	probeOutputBase := filepath.Join(outputDir, safeName(targetURL)+"-probe-out")
 	art.ProbeOutputBase = probeOutputBase
 
+	// 1. Initial Probe Invocation
 	xArgs := []string{"-probe", "-json", "-headers", "-dom"}
-	if uParsed.RawQuery != "" {
-		xArgs = append(xArgs, "-strict")
+	if paramFile != "" {
+		xArgs = append(xArgs, "-p", paramFile)
 	}
-	xArgs = append(xArgs, "-i", probeInput, "-o", probeOutputBase)
+	// Execute probe with expanded args
 	runCommand("./x9", xArgs...)
+
+	// ... [intermediate code] ...
+
+	// 2. Attack-Stage Invocation
+	atkArgs := []string{"-i", atkIn, "-json", "-headers", "-o", finalX9Base}
+	if paramFile != "" {
+		atkArgs = append(atkArgs, "-p", paramFile)
+	}
+	runCommand("./x9", atkArgs...)
 
 	domQueryProbeFile := filepath.Join(outputDir, safeName(targetURL)+"-dom-query-probe.txt")
 	art.DomQueryProbeFile = domQueryProbeFile
