@@ -269,7 +269,9 @@ class Http(Document):
         'collection': 'http_services',
         'auto_create_index': False,  # ✅ اینجا باید باشد
         'indexes': [
-            {'fields': ['program_name', 'subdomain'], 'unique': True}
+            {'fields': ['program_name', 'subdomain'], 'unique': True},
+            {'fields': ['program_name', 'scan_priority']},
+            {'fields': ['scan_priority']}
         ]
     }
 
