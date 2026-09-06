@@ -551,7 +551,15 @@ def get_http():
     q = q.order_by(order)
 
     total = q.count()
-    http_objs = list(q.skip((page - 1) * per_page).limit(per_page))
+    paginated_q = q.skip((page - 1) * per_page).limit(per_page)
+    
+    try:
+        cursor = paginated_q._cursor
+        cursor.allow_disk_use(True)
+        http_objs = list(paginated_q)
+    except AttributeError:
+        # Fallback if the underlying PyMongo cursor is not exposed as expected
+        http_objs = list(paginated_q)
     
     subdomains = [h.subdomain for h in http_objs]
     provider_docs = Subdomains.objects(subdomain__in=subdomains).only('subdomain', 'providers')
@@ -564,7 +572,6 @@ def get_http():
         'pages': (total + per_page - 1) // per_page,
         'data': [serialize_http(h, provider_map.get(h.subdomain, [])) for h in http_objs]
     })
-
 
 @app.route('/api/http/<subdomain>', methods=['GET'])
 def get_http_detail(subdomain):
