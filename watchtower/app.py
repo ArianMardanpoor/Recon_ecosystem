@@ -57,7 +57,16 @@ def safe_date_format(date_val):
 
 def paginate_response(query, page, per_page, serializer):
     total = query.count()
-    objects = query.skip((page - 1) * per_page).limit(per_page)
+    paginated_q = query.skip((page - 1) * per_page).limit(per_page)
+    
+    try:
+        cursor = paginated_q._cursor
+        cursor.allow_disk_use(True)
+        objects = list(paginated_q)
+    except AttributeError:
+        # Fallback if the underlying PyMongo cursor is not exposed as expected
+        objects = list(paginated_q)
+        
     return {
         'total': total,
         'page': page,
