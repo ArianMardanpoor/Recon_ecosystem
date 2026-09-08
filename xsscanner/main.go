@@ -68,7 +68,7 @@ func loadEnv() {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
+		parts := strings.SplitN(line, 2)
 		if len(parts) == 2 {
 			os.Setenv(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
 		}
@@ -402,7 +402,7 @@ func cleanupTargetOutput(target, dirPath string) {
 
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
-func processTarget(target string, priority int, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool) {
+func processTarget(target string, priority int, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool, workers int, fastWorkers int) {
 	logMsg(fmt.Sprintf("--- Starting: %s ---", target), M_purple+M_bold)
 
 	effectivePhase := phase
@@ -513,7 +513,7 @@ func processTarget(target string, priority int, isSingleTarget bool, skipSPA boo
 		}
 	}
 
-	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", "3", "-o", xssniperOutDir}
+	args := []string{"-l", jobFile, "-p", paramFilePath, "-w", fmt.Sprintf("%d", workers), "-fast-workers", fmt.Sprintf("%d", fastWorkers), "-o", xssniperOutDir}
 	if isSingleTarget {
 		args = append(args, "-u", target)
 	}
@@ -555,6 +555,12 @@ func main() {
 	phase := flag.Int("phase", 4, "Pipeline phase to stop at (2, 3, or 4)")
 	domScan := flag.Bool("dom-scan", false, "Enable DOM/headless sink checks (passed through to xssniper; slow, off by default)")
 	useKatana := flag.Bool("use-katana", false, "Run nice_katana crawl step (slow; off by default, only passive+params run otherwise)")
+
+	var workers int
+	flag.IntVar(&workers, "w", 3, "Value passed as -w to xssniper subprocess")
+	var fastWorkers int
+	flag.IntVar(&fastWorkers, "fast-workers", 15, "Value passed as -fast-workers to xssniper subprocess")
+
 	flag.Parse()
 
 	// STEP 1: Capture terminal output to temp file explicitly via logWriter
@@ -626,7 +632,7 @@ func main() {
 
 	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
-		processTarget(target.URL, target.Priority, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana)
+		processTarget(target.URL, target.Priority, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana, workers, fastWorkers)
 	}
 
 	mdPath := "results/TARGET_REPORT.md"
