@@ -25,6 +25,11 @@ def run_command_safe(command_args, shell=False, timeout=60):
         )
         
         if result.returncode != 0:
+            # دیباگ لاگ برای بررسی خطاهای بی‌صدا
+            cmd_str = ' '.join(command_args) if isinstance(command_args, list) else str(command_args)
+            stderr_out = result.stderr[:1000] if result.stderr else "No stderr output"
+            print(f"[!] Command failed (code {result.returncode}): {cmd_str}")
+            print(f"[!] Stderr (first 1000 chars): {stderr_out}")
             return None
         
         return result.stdout.splitlines()
