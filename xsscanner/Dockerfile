@@ -1,5 +1,4 @@
-# xsscanner/Dockerfile
-
+# لایه‌های نصب ابزار از لایه‌های کد جدا شدن تا rebuild بعد از تغییر کد سریع باشه
 FROM golang:latest AS builder
 
 WORKDIR /build
