@@ -10,28 +10,20 @@ from database.db import LiveSubdomains, upsert_http, current_time
 from utils.safe_subprocess import run_command_safe
 
 def get_httpx_path():
-    env_path = os.environ.get("HTTPX_PATH")
-    if env_path:
-        if os.path.isfile(env_path) and os.access(env_path, os.X_OK):
-            return env_path
-        else:
-            print(f"[{current_time()}] [!] HTTPX_PATH is set to '{env_path}' but it's not a valid executable, falling back...")
-            
-    which_path = shutil.which("httpx")
-    if which_path and os.path.isfile(which_path) and os.access(which_path, os.X_OK):
-        return which_path
-        
+    if "HTTPX_PATH" in os.environ:
+        return os.environ["HTTPX_PATH"]
+    if shutil.which("httpx"):
+        return shutil.which("httpx")
     fallback_path = os.path.expanduser("~/go/bin/httpx")
-    if os.path.isfile(fallback_path) and os.access(fallback_path, os.X_OK):
+    if os.path.exists(fallback_path):
         return fallback_path
-        
     return "httpx"
 
 class colors:
     Gray = "\033[90m"
     Reset = "\033[0m"
 
-def run_httpx_bulk(subdomains, domain, httpx_bin):
+def run_httpx_bulk(subdomains, domain):
     if not subdomains:
         print(f"[{current_time()}] No live subdomains to scan for {domain}")
         return
@@ -42,7 +34,7 @@ def run_httpx_bulk(subdomains, domain, httpx_bin):
         temp_file_path = temp_file.name
 
     command = [
-                httpx_bin,
+                get_httpx_path(),
                 "-l", temp_file_path, 
                 "-silent", 
                 "-json", 
@@ -108,16 +100,10 @@ if __name__ == "__main__":
         sys.exit(1)
     
     domain = sys.argv[1].strip() # حذف اسپیس‌های احتمالی از ورودی CLI
-    
-    # لاگ‌گیری ابتدای برنامه برای رفع مشکل مسیر باینری
-    httpx_bin = get_httpx_path()
-    env_var = os.environ.get("HTTPX_PATH", "(not set)")
-    print(f"[{current_time()}] Resolved httpx path: {httpx_bin} (HTTPX_PATH env: {env_var})")
-
     live_subdomains = LiveSubdomains.objects(scope=domain)
     
     if live_subdomains:
         subdomain_list = [live.subdomain for live in live_subdomains]
-        run_httpx_bulk(subdomain_list, domain, httpx_bin)
+        run_httpx_bulk(subdomain_list, domain)
     else:
         print(f"[{current_time()}] No live subdomains found for scope: {domain}")

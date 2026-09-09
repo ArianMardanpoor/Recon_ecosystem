@@ -13,21 +13,13 @@ from utils.notify import flush_all
 from utils.cli_helpers import parse_program_filter
 
 def get_httpx_path():
-    env_path = os.environ.get("HTTPX_PATH")
-    if env_path:
-        if os.path.isfile(env_path) and os.access(env_path, os.X_OK):
-            return env_path
-        else:
-            print(f"[{current_time()}] [!] HTTPX_PATH is set to '{env_path}' but it's not a valid executable, falling back...")
-            
-    which_path = shutil.which("httpx")
-    if which_path and os.path.isfile(which_path) and os.access(which_path, os.X_OK):
-        return which_path
-        
+    if "HTTPX_PATH" in os.environ:
+        return os.environ["HTTPX_PATH"]
+    if shutil.which("httpx"):
+        return shutil.which("httpx")
     fallback_path = os.path.expanduser("~/go/bin/httpx")
-    if os.path.isfile(fallback_path) and os.access(fallback_path, os.X_OK):
+    if os.path.exists(fallback_path):
         return fallback_path
-        
     return "httpx"
 
 if __name__ == "__main__":
@@ -35,11 +27,6 @@ if __name__ == "__main__":
     parser.add_argument('--program', type=str, default=None,
                         help="Run only for the specified program name(s), comma-separated.")
     args = parser.parse_args()
-
-    # لاگ‌گیری ابتدای برنامه برای رفع مشکل مسیر باینری
-    httpx_bin = get_httpx_path()
-    env_var = os.environ.get("HTTPX_PATH", "(not set)")
-    print(f"[{current_time()}] Resolved httpx path: {httpx_bin} (HTTPX_PATH env: {env_var})")
 
     program_filter = parse_program_filter(args.program)
 
@@ -77,7 +64,7 @@ if __name__ == "__main__":
                     temp_file_path = temp_file.name
 
                     command = [
-                        httpx_bin, 
+                        get_httpx_path(), 
                         "-l", temp_file_path, 
                         "-silent", 
                         "-json", 
