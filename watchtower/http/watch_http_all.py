@@ -53,7 +53,7 @@ if __name__ == "__main__":
                     temp_file_path = temp_file.name
 
                     command = [
-                        "/home/arian/go/bin/httpx", 
+                        "/usr/local/bin/httpx", 
                         "-l", temp_file_path, 
                         "-silent", 
                         "-json", 

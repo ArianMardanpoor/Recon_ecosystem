@@ -23,7 +23,7 @@ def run_httpx_bulk(subdomains, domain):
         temp_file_path = temp_file.name
 
     command = [
-                "/home/arian/go/bin/httpx",
+                "/usr/local/bin/httpx",
                 "-l", temp_file_path, 
                 "-silent", 
                 "-json", 
