@@ -109,6 +109,8 @@ def serialize_live(l):
         'scope': l.scope,
         'ips': l.ips,
         'cdn': l.cdn,
+        'is_cdn': getattr(l, 'is_cdn', None),
+        'cdn_checked_date': safe_date_format(getattr(l, 'cdn_checked_date', None)),
         'tested': getattr(l, 'tested', False),
         'created_date': safe_date_format(l.created_date),
         'last_update': safe_date_format(l.last_update)
@@ -321,6 +323,12 @@ def get_lives():
     elif has_cdn == 'false':
         q = q.filter(Q(cdn='') | Q(cdn__exists=False))
 
+    is_cdn_filter = request.args.get('is_cdn', '').lower()
+    if is_cdn_filter == 'true':
+        q = q.filter(is_cdn=True)
+    elif is_cdn_filter == 'false':
+        q = q.filter(is_cdn=False)
+
     cdn = request.args.get('cdn', '').strip()
     if cdn:
         q = q.filter(cdn__icontains=cdn)
@@ -349,6 +357,29 @@ def get_lives():
             q = q.filter(subdomain__in=http_subs)
         else:
             q = q.filter(subdomain__nin=http_subs)
+
+    sort_map = {
+        'created_date': '+created_date', '-created_date': '-created_date',
+        'last_update': '+last_update', '-last_update': '-last_update',
+        'subdomain': '+subdomain', '-subdomain': '-subdomain',
+    }
+    order = sort_map.get(request.args.get('sort', '-created_date'), '-created_date')
+    q = q.order_by(order)
+
+    return jsonify(paginate_response(q, page, per_page, serialize_live))
+
+
+@app.route('/api/lives/non-cdn', methods=['GET'])
+def get_non_cdn_lives():
+    page, per_page = get_pagination_args()
+    q = LiveSubdomains.objects(is_cdn=False)
+
+    program = request.args.get('program', '').strip()
+    programs_csv = request.args.get('programs', '').strip()
+    if program:
+        q = q.filter(program_name=program)
+    elif programs_csv:
+        q = q.filter(program_name__in=[p.strip() for p in programs_csv.split(',') if p.strip()])
 
     sort_map = {
         'created_date': '+created_date', '-created_date': '-created_date',
@@ -713,11 +744,18 @@ def get_assets():
 
 @app.route('/api/stats', methods=['GET'])
 def global_stats():
+    # از آنجایی که ips یک ListField است، distinct('ips') در مانگو تمام مقادیر 
+    # آرایه‌ها را مسطح (flatten) کرده و یک لیست پایتونی از IPهای یکتا برمی‌گرداند.
+    # به همین دلیل گرفتن ()len از آن صحیح و بهینه‌ترین روش است.
+    non_cdn_ips_count = len(LiveSubdomains.objects(is_cdn=False).distinct('ips'))
+    
     return jsonify({
         'programs': Programs.objects().count(),
         'subdomains': Subdomains.objects().count(),
         'live': LiveSubdomains.objects().count(),
         'http': Http.objects().count(),
+        'non_cdn_ips': non_cdn_ips_count,
+        'cdn_checked_total': LiveSubdomains.objects(is_cdn__ne=None).count(),
         'new_subdomains_24h': Subdomains.objects(
             created_date__gte=datetime.now() - timedelta(hours=24)).count(),
         'new_live_24h': LiveSubdomains.objects(
@@ -892,6 +930,26 @@ def get_ips():
     for h in q.only('ips'):
         all_ips.update(h.ips)
     return jsonify(sorted(all_ips))
+
+
+@app.route('/api/meta/non-cdn-ips', methods=['GET'])
+def get_non_cdn_ips():
+    program = request.args.get('program', '').strip()
+    q = LiveSubdomains.objects(is_cdn=False)
+    
+    if program:
+        q = q.filter(program_name=program)
+        
+    all_ips = set()
+    for l in q.only('ips'):
+        all_ips.update(l.ips)
+        
+    sorted_ips = sorted(all_ips)
+    return jsonify({
+        'total': len(sorted_ips),
+        'program': program or 'all',
+        'ips': sorted_ips
+    })
 
 
 # ==========================================

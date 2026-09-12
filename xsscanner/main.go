@@ -68,7 +68,7 @@ func loadEnv() {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
+		parts := strings.SplitN(line, 2)
 		if len(parts) == 2 {
 			os.Setenv(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
 		}
@@ -402,7 +402,7 @@ func cleanupTargetOutput(target, dirPath string) {
 
 // ── تابع پردازش هدف (Sequential Waterfall) ─────────────────────────────────
 
-func processTarget(target string, priority int, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool, workers int, fastWorkers int) {
+func processTarget(target string, priority int, isSingleTarget bool, skipSPA bool, noCrawl bool, phase int, domScan bool, useKatana bool, workers int, fastWorkers int, crawlParams bool) {
 	logMsg(fmt.Sprintf("--- Starting: %s ---", target), M_purple+M_bold)
 
 	effectivePhase := phase
@@ -464,7 +464,14 @@ func processTarget(target string, priority int, isSingleTarget bool, skipSPA boo
 
 		// STEP 3: Params always runs (independent of katana)
 		logMsg(fmt.Sprintf("Running nice_params for %s", target), M_gray)
-		if err := runBinary("./nice_params", "-u", target, "-d", paramsDir); err != nil {
+
+		// اضافه کردن آرگومان‌ها به صورت پویا با پشتیبانی از فلگ جدید
+		paramsArgs := []string{"-u", target, "-d", paramsDir}
+		if crawlParams {
+			paramsArgs = append(paramsArgs, "-crawl")
+		}
+
+		if err := runBinary("./nice_params", paramsArgs...); err != nil {
 			logMsg(fmt.Sprintf("nice_params failed for %s: %v", target, err), M_red)
 		}
 	}
@@ -556,6 +563,9 @@ func main() {
 	domScan := flag.Bool("dom-scan", false, "Enable DOM/headless sink checks (passed through to xssniper; slow, off by default)")
 	useKatana := flag.Bool("use-katana", false, "Run nice_katana crawl step (slow; off by default, only passive+params run otherwise)")
 
+	// اضافه کردن فلگ جدید برای اجرای حالت crawl در nice_params
+	crawlParams := flag.Bool("crawl-params", false, "Pass -crawl flag to nice_params (uses Katana in fallparams)")
+
 	var workers int
 	flag.IntVar(&workers, "w", 3, "Value passed as -w to xssniper subprocess")
 	var fastWorkers int
@@ -632,7 +642,8 @@ func main() {
 
 	logMsg(fmt.Sprintf("Ready to process %d targets in %s mode.", len(newTargets), strings.ToUpper(modeStr)), M_cyan)
 	for _, target := range newTargets {
-		processTarget(target.URL, target.Priority, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana, workers, fastWorkers)
+		// اضافه کردن *crawlParams به فراخوانی تابع
+		processTarget(target.URL, target.Priority, isSingleTarget, *skipSPA, *noCrawl, *phase, *domScan, *useKatana, workers, fastWorkers, *crawlParams)
 	}
 
 	mdPath := "results/TARGET_REPORT.md"

@@ -225,6 +225,8 @@ class LiveSubdomains(Document):
     tested = BooleanField(default=False)
     created_date = DateTimeField(default=datetime.now)
     last_update = DateTimeField(default=datetime.now)
+    is_cdn = BooleanField(default=None, null=True)
+    cdn_checked_date = DateTimeField(default=None, null=True)
 
     meta = {
         'collection': 'live_subdomains',
@@ -463,6 +465,47 @@ def upsert_live(obj):
 
     return True
 
+@retry_on_autoreconnect(max_retries=3)
+def bulk_update_cdn_status(ip_to_is_cdn_map: dict) -> bool:
+    """
+    ip_to_is_cdn_map: {ip: bool} — bool=True یعنی IP پشت CDN است.
+    برای هر LiveSubdomains سندی که این IP رو داره، فیلد is_cdn رو آپدیت می‌کنه.
+    """
+    if not ip_to_is_cdn_map:
+        return True
+
+    operations = []
+    # فقط داکیومنت‌هایی را می‌گیریم که IP آن‌ها بررسی شده است
+    docs = LiveSubdomains.objects(ips__in=list(ip_to_is_cdn_map.keys())).only('subdomain', 'ips')
+
+    for doc in docs:
+        if not doc.ips:
+            continue
+            
+        is_cdn = True
+        for ip in doc.ips:
+            # اگر حداقل یک IP غیر CDN (False) باشد، کل دامین non-cdn محسوب می‌شود
+            if ip in ip_to_is_cdn_map and ip_to_is_cdn_map[ip] is False:
+                is_cdn = False
+                break
+                
+        operations.append(
+            UpdateOne(
+                {'subdomain': doc.subdomain},
+                {
+                    '$set': {
+                        'is_cdn': is_cdn,
+                        'cdn_checked_date': datetime.now()
+                    }
+                }
+            )
+        )
+
+    if operations:
+        collection = LiveSubdomains._get_collection()
+        collection.bulk_write(operations, ordered=False)
+
+    return True
 
 @retry_on_autoreconnect(max_retries=3)
 def upsert_http(obj):

@@ -60,6 +60,7 @@ type Config struct {
 	NoX8      bool
 	NoFall    bool
 	MaxParams int
+	Crawl     bool // فلگ جدید برای اجرای crawl در fallparams
 }
 
 var (
@@ -282,7 +283,7 @@ func isCandidateWord(w string) bool {
 	return true
 }
 
-func runFallparams(ctx context.Context, rawURL string, silent bool) ([]string, error) {
+func runFallparams(ctx context.Context, rawURL string, silent bool, crawl bool) ([]string, error) {
 	if err := checkTool("fallparams"); err != nil {
 		return nil, err
 	}
@@ -297,7 +298,12 @@ func runFallparams(ctx context.Context, rawURL string, silent bool) ([]string, e
 	}
 	registerTemp(runDir)
 
-	cmd := exec.CommandContext(ctx, "fallparams", "-u", rawURL)
+	// تعریف آرگومان‌ها به صورت پویا با توجه به crawl
+	args := []string{"-u", rawURL}
+	if crawl {
+		args = append(args, "-crawl")
+	}
+	cmd := exec.CommandContext(ctx, "fallparams", args...)
 	cmd.Dir = runDir
 
 	_, _ = cmd.CombinedOutput()
@@ -499,7 +505,8 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 	var candidates []string
 
 	if !cfg.NoFall {
-		words, err := runFallparams(toolCtx, rawURL, cfg.Silent)
+		// اضافه شدن cfg.Crawl به عنوان پارامتر ورودی
+		words, err := runFallparams(toolCtx, rawURL, cfg.Silent, cfg.Crawl)
 		if err != nil {
 			fallErr = fmt.Errorf("fallparams error for %s: %v", rawURL, err)
 			if !cfg.Silent {
@@ -684,6 +691,7 @@ func main() {
 	flag.BoolVar(&cfg.NoX8, "no-x8", false, "Skip x8 (fallparams only)")
 	flag.BoolVar(&cfg.NoFall, "no-fall", false, "Skip fallparams (x8 only)")
 	flag.IntVar(&cfg.MaxParams, "max-params", 200, "Maximum number of parameters to keep per host")
+	flag.BoolVar(&cfg.Crawl, "crawl", false, "Use Katana to crawl links with fallparams") // فلگ جدید
 
 	flag.Usage = func() {
 		printf("%sUsage:%s\n", PR_boldYellow, PR_reset)
@@ -691,7 +699,8 @@ func main() {
 		printf("  nice_params -f <file>                       Bulk URLs from file\n")
 		printf("  nice_params -u <URL> -w <wordlist>          Custom wordlist for x8\n")
 		printf("  nice_params -f urls.txt -d results/         Save host-param.txt files to custom dir\n")
-		printf("  nice_params -f urls.txt -t 10               10 concurrent workers\n\n")
+		printf("  nice_params -f urls.txt -t 10               10 concurrent workers\n")
+		printf("  nice_params -u <URL> -crawl                 Use Katana crawl for fallparams\n\n") // راهنمای جدید
 		printf("%sOutput:%s\n", PR_boldYellow, PR_reset)
 		printf("  Files are automatically named <HOST>-param.txt (e.g. asda.com-param.txt)\n\n")
 		printf("%sFlags:%s\n", PR_boldYellow, PR_reset)

@@ -3,10 +3,27 @@ import sys
 import os
 import json
 import tempfile
+import shutil
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import LiveSubdomains, upsert_http, current_time
 from utils.safe_subprocess import run_command_safe
+
+def get_httpx_path():
+    if shutil.which("httpx"):
+        return "httpx"
+    
+    possible_paths = [
+        "/usr/local/bin/httpx",
+        "/home/arian/.local/bin/httpx",
+        "/home/arian/go/bin/httpx"
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+            
+    return "httpx"
 
 class colors:
     Gray = "\033[90m"
@@ -23,7 +40,7 @@ def run_httpx_bulk(subdomains, domain):
         temp_file_path = temp_file.name
 
     command = [
-                "/usr/local/bin/httpx",
+                get_httpx_path(),
                 "-l", temp_file_path, 
                 "-silent", 
                 "-json", 
