@@ -1,0 +1,10 @@
+{
+  "program_name": "walmart",
+  "scopes": [
+    "*.walmart.com",
+    "*.wal-mart.com"
+  ],
+  "outofscope": [
+
+  ]
+}
