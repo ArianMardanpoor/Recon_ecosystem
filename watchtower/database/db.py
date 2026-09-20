@@ -77,6 +77,7 @@ connect_kwargs = {
     "minPoolSize": 2,                       # حداقل اتصالات نگهداری شده
     "maxIdleTimeMS": 60000,                 # بستن اتصالات بی‌فعال بعد از ۶۰ ثانیه
     "waitQueueTimeoutMS": 30000,            # زمان انتظار برای گرفتن اتصال از pool
+    "heartbeatFrequencyMS": 30000, 
 }
 
 # تنظیمات TLS برای Atlas
