@@ -4,29 +4,12 @@ import os
 import json
 import tempfile
 import argparse
-import shutil
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from database.db import Programs, LiveSubdomains, upsert_http, current_time
 from utils.safe_subprocess import run_command_safe
 from utils.notify import flush_all
 from utils.cli_helpers import parse_program_filter
-
-def get_httpx_path():
-    if shutil.which("httpx"):
-        return "httpx"
-    
-    possible_paths = [
-        "/usr/local/bin/httpx",
-        "/home/arian/.local/bin/httpx",
-        "/home/arian/go/bin/httpx"
-    ]
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-            
-    return "httpx"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Httpx All for all (or one/multiple) program(s).")
@@ -70,7 +53,7 @@ if __name__ == "__main__":
                     temp_file_path = temp_file.name
 
                     command = [
-                        get_httpx_path(), 
+                        "/home/arian/go/bin/httpx", 
                         "-l", temp_file_path, 
                         "-silent", 
                         "-json", 
