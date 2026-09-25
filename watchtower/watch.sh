@@ -79,24 +79,20 @@ run_module() {
     echo "[+] Finished $script_name."
 }
 
-# نکته: ns/watch_shuffledns_all.py جایگزین ns/watch_ns_all.py شده است
-# (resolve با shuffledns/massdns به‌جای dnsx + wildcard_filter.py دستی).
-# این ماژول در انتهای اجرای خودش به‌صورت خودکار http/watch_http_all.py را
-# هم صدا می‌زند، به همین دلیل دیگر مرحله‌ی جداگانه‌ای برای httpx در این
-# فایل وجود ندارد (تا httpx دوبار اجرا نشود).
-
 # اجرای زنجیره‌ای ماژول‌ها به ترتیب
 if [ -n "$PROGRAM_FILTER" ]; then
     echo "[*] Running in filtered mode for programs: $PROGRAM_FILTER"
     run_module "programs/watch_sync_program.py" --program "$PROGRAM_FILTER"
     run_module "enum/watch_enum_all.py" --program "$PROGRAM_FILTER"
-    run_module "ns/watch_shuffledns_all.py" --program "$PROGRAM_FILTER"
+    run_module "ns/watch_ns_all.py" --program "$PROGRAM_FILTER"
+    run_module "http/watch_http_all.py" --program "$PROGRAM_FILTER"
     run_module "maintenance/watch_cleanup_orphans.py" --program "$PROGRAM_FILTER"
 else
     echo "[*] Running in full mode (all programs)"
     run_module "programs/watch_sync_program.py"
     run_module "enum/watch_enum_all.py"
-    run_module "ns/watch_shuffledns_all.py"
+    run_module "ns/watch_ns_all.py"
+    run_module "http/watch_http_all.py"
     run_module "maintenance/watch_cleanup_orphans.py"
 fi
 
