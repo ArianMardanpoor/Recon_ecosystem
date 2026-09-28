@@ -1,0 +1,27 @@
+{
+  "program_name": "flickr",
+  "scopes": [
+    "*.flickr.com",
+    "www.whatismode.com",
+    "modefestival.com"
+  ],
+  "outofscope": [
+    "blog.flickr.com",
+    "amt.flickr.com",
+    "appletv.flickr.com",
+    "blogtest.flickr.com",
+    "bluebird.flickr.com",
+    "code.flickr.com",
+    "csp.flickr.com",
+    "guce.flickr.com",
+    "stage.guce.flickr.com",
+    "trunk.guce.flickr.com",
+    "health.flickr.com",
+    "help.flickr.com",
+    "parkorbird.flickr.com",
+    "links.flickr.com",
+    "*.flickr.net",
+    "flickrhelp.com",
+    "Zero Day Vulnerabilities/Security Upgrades"
+  ]
+}
