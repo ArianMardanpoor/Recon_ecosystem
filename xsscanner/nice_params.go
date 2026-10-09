@@ -60,7 +60,8 @@ type Config struct {
 	NoX8      bool
 	NoFall    bool
 	MaxParams int
-	Crawl     bool // فلگ جدید برای اجرای crawl در fallparams
+	Crawl     bool   // فلگ جدید برای اجرای crawl در fallparams
+	ReqFile   string // فایل حاوی کل درخواست خام HTTP برای x8 (-r)
 }
 
 var (
@@ -424,12 +425,19 @@ func extractX8Params(content string) []string {
 	return out
 }
 
-func runX8(ctx context.Context, rawURL, wordlist string, silent bool) ([]string, error) {
+func runX8(ctx context.Context, rawURL, wordlist, reqFile string, silent bool) ([]string, error) {
 	if err := checkTool("x8"); err != nil {
 		return nil, err
 	}
 
-	if !silent {
+	if reqFile != "" {
+		if _, err := os.Stat(reqFile); err != nil {
+			return nil, fmt.Errorf("request file not found: %s", reqFile)
+		}
+		if !silent {
+			printStep(fmt.Sprintf("x8 → %s (-r %s)", rawURL, reqFile))
+		}
+	} else if !silent {
 		printStep(fmt.Sprintf("x8 → %s", rawURL))
 	}
 
@@ -440,15 +448,24 @@ func runX8(ctx context.Context, rawURL, wordlist string, silent bool) ([]string,
 	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("x8_%d_%d.txt", os.Getpid(), time.Now().UnixNano()))
 	registerTemp(tmpFile)
 
-	args := []string{
-		"-u", rawURL,
+	// وقتی -r (فایل درخواست خام) داده شده، x8 باید از -r استفاده کنه، نه -u.
+	// طبق مستندات x8، این دو سوییچ با هم استفاده نمی‌شن.
+	var target []string
+	if reqFile != "" {
+		target = []string{"-r", reqFile}
+	} else {
+		target = []string{"-u", rawURL}
+	}
+
+	args := append([]string{}, target...)
+	args = append(args,
 		"-w", wordlist,
 		"-o", tmpFile,
 		"-c", "5", // کانکارنسی ۵ بسیار عالی و چراغ‌خاموش است
 		"--delay", "1000", // اصلاح شد: ۱۰۰۰ میلی‌ثانیه معادل ۱ ثانیه تاخیر واقعی
 		"--timeout", "15",
 		"-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-	}
+	)
 	cmd := exec.CommandContext(ctx, "x8", args...)
 
 	out, err := cmd.CombinedOutput()
@@ -545,7 +562,7 @@ func processURL(ctx context.Context, rawURL string, cfg *Config) Result {
 			}
 		}
 
-		params, err := runX8(toolCtx, rawURL, x8Wordlist, cfg.Silent)
+		params, err := runX8(toolCtx, rawURL, x8Wordlist, cfg.ReqFile, cfg.Silent)
 		if err != nil {
 			x8Err = fmt.Errorf("x8 error for %s: %v", rawURL, err)
 			if !cfg.Silent {
@@ -692,6 +709,7 @@ func main() {
 	flag.BoolVar(&cfg.NoFall, "no-fall", false, "Skip fallparams (x8 only)")
 	flag.IntVar(&cfg.MaxParams, "max-params", 200, "Maximum number of parameters to keep per host")
 	flag.BoolVar(&cfg.Crawl, "crawl", false, "Use Katana to crawl links with fallparams") // فلگ جدید
+	flag.StringVar(&cfg.ReqFile, "r", "", "Raw HTTP request file for x8 (x8 uses -r + this file instead of -u; fallparams still uses -u)")
 
 	flag.Usage = func() {
 		printf("%sUsage:%s\n", PR_boldYellow, PR_reset)
@@ -700,7 +718,8 @@ func main() {
 		printf("  nice_params -u <URL> -w <wordlist>          Custom wordlist for x8\n")
 		printf("  nice_params -f urls.txt -d results/         Save host-param.txt files to custom dir\n")
 		printf("  nice_params -f urls.txt -t 10               10 concurrent workers\n")
-		printf("  nice_params -u <URL> -crawl                 Use Katana crawl for fallparams\n\n") // راهنمای جدید
+		printf("  nice_params -u <URL> -crawl                 Use Katana crawl for fallparams\n")
+		printf("  nice_params -u <URL> -r req.txt             fallparams uses -u, x8 uses -r req.txt instead of -u\n\n") // راهنمای جدید
 		printf("%sOutput:%s\n", PR_boldYellow, PR_reset)
 		printf("  Files are automatically named <HOST>-param.txt (e.g. asda.com-param.txt)\n\n")
 		printf("%sFlags:%s\n", PR_boldYellow, PR_reset)
@@ -752,6 +771,17 @@ func main() {
 		printError("specify -u <URL> or -f <file>")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if cfg.ReqFile != "" {
+		if cfg.URLFile != "" {
+			printError("-r (raw request file) can only be used with -u, not with -f (one request file cannot map to multiple URLs)")
+			os.Exit(1)
+		}
+		if _, err := os.Stat(cfg.ReqFile); err != nil {
+			printError(fmt.Sprintf("request file not found: %s", cfg.ReqFile))
+			os.Exit(1)
+		}
 	}
 
 	if cfg.Threads < 1 {
