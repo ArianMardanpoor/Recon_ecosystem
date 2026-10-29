@@ -1,0 +1,26 @@
+{
+  "program_name": "dell",
+  "scopes": [
+    "*.dell.com",
+    "*.delltechnologies.com",
+    "console.delltechnologies.com",
+    "console.delltechnologies.com/nav/administration",
+    "console.delltechnologies.com/nav/invoice",
+    "console.delltechnologies.com/nav/billing",
+    "console.delltechnologies.com/nav/catalog",
+    "console.delltechnologies.com/nav/support",
+    "console.delltechnologies.com/nav/subscriptions",
+    "educate.dell.com",
+    "console.dell.com",
+    "console-test.dell.com",
+    "salesproductivity.dell.com"
+  ],
+  "outofscope": [
+    "www.dell.com/Identity/global/*",
+    "www-poc.dell.com/Identity/*",
+    "pilot.search.dell.com/Identity/global/*",
+    "www.dell.com/sso/sm/*",
+    "www.dell.com/financing/comm/dpamarcom/CreditApp",
+    "www.dell.com/Financing/Comm/PreQual"
+  ]
+}
